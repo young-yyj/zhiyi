@@ -5,7 +5,7 @@
   },
   "name": "__MSG_app_name__",
   "description": "__MSG_app_description__",
-  "version": "1.0.0.0",
+  "version": "1.0.1.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlYLcrEzhITjpTPwAphc4CKZ/xT5Tm52PfcyfuD0QLb7xOg14nguB0ssuknDFQ+mrfHGJZ+YA6+0qAOguhKgXu9Dq/27fYQGvQQHdB2udEc9EGkwHarsXgOaQaQ4YDap/XtXoiM22rWfiRIXuO8z6qnQNNUqRbU2huVtaMLABPBZ6dE+FqSQhYeK/yUJHF3BEyRgWHIAbweo/RN7qcs/DsW3mqFUaWXzg3ZB+tzQqYSzLxJP8mjU/45aX+SXOUmN/6s8UUDSn5A1LvnVZrPdmPzGKj1vZYIRSVbSgsXPWpT+bxSOUK6xKkBbfj0F+rtAPuLZpn8BUkHJrBo2q2JMUTQIDAQAB",
   "default_locale": "en",
   "author": "Gabe<yugang2002@gmail.com>",
