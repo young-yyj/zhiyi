@@ -1,0 +1,97 @@
+import IconButton from "@mui/material/IconButton";
+import FavoriteIcon from "@mui/icons-material/Favorite";
+import FavoriteBorderIcon from "@mui/icons-material/FavoriteBorder";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useFavWords } from "../../hooks/FavWords";
+import { logger } from "../../libs/log";
+import { useSetting } from "../../hooks/Setting";
+import { EVENT_FAVORITE_WORD_CHANGE } from "../../config";
+
+/**
+ * Favorite word button with a heart icon.
+ *
+ * @param {Object} props
+ * @param {string} props.word - Word to add to or remove from favorites.
+ * @param {string} props.title - Hover tooltip text.
+ * @param {{sentence?: string, url?: string}|null} props.source - Optional webpage source metadata.
+ */
+export default function FavBtn({ word, title, source = null }) {
+  // Read favorite words and the toggle action from useFavWords.
+  const { favWords, toggleFav, mergeWords, isLoading } = useFavWords();
+  const { context, setting } = useSetting();
+  const [loading, setLoading] = useState(false);
+  const pending = useRef(false);
+  const autoAttempt = useRef(null);
+  const isFavorite = Boolean(favWords[word]);
+  const autoCollect =
+    context === "tranbox" && setting?.tranboxSetting?.autoFavWord;
+  const hasSource = Boolean(
+    (typeof source?.sentence === "string" && source.sentence.trim()) ||
+      (typeof source?.url === "string" && source.url.trim())
+  );
+
+  // Toggle the favorite state on click.
+  const saveFavorite = useCallback(
+    async (collectOnly = false) => {
+      if (isLoading || pending.current) return;
+      pending.current = true;
+      try {
+        setLoading(true);
+        const receipt = await (collectOnly
+          ? hasSource
+            ? mergeWords([word], { source })
+            : mergeWords([word])
+          : hasSource
+            ? toggleFav(word, null, "", "", [], source)
+            : toggleFav(word));
+        const isFavorite = Boolean(receipt.value[word]);
+        document.dispatchEvent(
+          new CustomEvent(EVENT_FAVORITE_WORD_CHANGE, {
+            detail: { word, isFavorite },
+          })
+        );
+      } catch (err) {
+        logger.child("fav-btn").info("set fav", err);
+      } finally {
+        pending.current = false;
+        setLoading(false);
+      }
+    },
+    [hasSource, mergeWords, source, toggleFav, word, isLoading]
+  );
+
+  useEffect(() => {
+    if (!autoCollect) autoAttempt.current = null;
+    if (
+      !isLoading &&
+      !loading &&
+      !pending.current &&
+      autoCollect &&
+      word &&
+      !favWords[word] &&
+      autoAttempt.current !== word
+    ) {
+      // Automatic collection is additive and a failed attempt requires an explicit retry.
+      autoAttempt.current = word;
+      void saveFavorite(true);
+    }
+  }, [autoCollect, favWords, saveFavorite, word, isLoading, loading]);
+
+  return (
+    <IconButton
+      disabled={loading || isLoading}
+      size="small"
+      onClick={() => saveFavorite()}
+      title={title}
+      aria-label={title}
+      aria-pressed={isFavorite}
+    >
+      {/* Use a filled heart for favorite words and an outline otherwise. */}
+      {isFavorite ? (
+        <FavoriteIcon fontSize="inherit" />
+      ) : (
+        <FavoriteBorderIcon fontSize="inherit" />
+      )}
+    </IconButton>
+  );
+}

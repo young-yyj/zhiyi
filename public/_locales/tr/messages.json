@@ -1,0 +1,38 @@
+{
+  "app_name": {
+    "message": "KISS Translator"
+  },
+  "app_description": {
+    "message": "Web sayfalarını, seçili metni ve video altyazılarını destekleyen minimalist iki dilli çeviri uzantısı."
+  },
+  "translate_selection": {
+    "message": "\"%s\" ifadesini çevir"
+  },
+  "toggle_translate": {
+    "message": "Çeviriyi aç/kapat"
+  },
+  "toggle_translate_only": {
+    "message": "Yalnızca çeviriyi göster"
+  },
+  "toggle_style": {
+    "message": "Stilleri aç/kapat"
+  },
+  "open_options": {
+    "message": "Ayarları aç"
+  },
+  "open_tranbox": {
+    "message": "Çeviri penceresini aç"
+  },
+  "open_separate_window": {
+    "message": "Bağımsız pencereyi aç"
+  },
+  "toggle_tranbox": {
+    "message": "Çeviri kutusunu aç/kapat"
+  },
+  "image_screenshot_command": {
+    "message": "Ekran Görüntüsü Çevirisi"
+  },
+  "image_screenshot": {
+    "message": "Ekran Görüntüsü Çevirisi"
+  }
+}

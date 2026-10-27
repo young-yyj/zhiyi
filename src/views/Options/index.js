@@ -1,0 +1,277 @@
+import {
+  Route,
+  createHashRouter,
+  createRoutesFromElements,
+  RouterProvider,
+  useLocation,
+} from "react-router-dom";
+import About from "./About";
+import Rules from "./Rules";
+import Setting from "./Setting";
+import Layout from "./Layout";
+import SyncSetting from "./SyncSetting";
+import { SettingProvider } from "../../hooks/Setting";
+import ThemeProvider from "./OptionsTheme";
+import {
+  createContext,
+  useContext,
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { isGm, isExt } from "../../libs/client";
+import Diagnostics from "./Diagnostics";
+import { STOKEY_SETTING } from "../../config";
+import { AlertProvider } from "../../hooks/Alert";
+import { ConfirmProvider } from "../../hooks/Confirm";
+import Link from "@mui/material/Link";
+import Divider from "@mui/material/Divider";
+import Stack from "@mui/material/Stack";
+import Alert from "@mui/material/Alert";
+import Apis from "./Apis";
+import Prompts from "./Prompts";
+import InputSetting from "./InputSetting";
+import Tranbox from "./Tranbox";
+import FavWords from "./FavWords";
+import Playgound from "./Playground";
+import MouseHoverSetting from "./MouseHover";
+import SubtitleSetting from "./Subtitle";
+import ImageTranslate from "./ImageTranslate";
+import StylesSetting from "./StylesSetting";
+import Backdrop from "@mui/material/Backdrop";
+import CircularProgress from "@mui/material/CircularProgress";
+import InteractionLock from "./InteractionLock";
+import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
+import Typography from "@mui/material/Typography";
+import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded";
+import { openFileTranslatePage } from "../../libs/navigation";
+import { isAutoTranslateClipboardSupported } from "../../libs/client";
+import {
+  createOptionsStartup,
+  getRequiredOptionsSyncKeys,
+  OPTIONS_SYNC_KEYS,
+} from "./startup";
+
+import { useI18n } from "../../hooks/I18n";
+
+export { normalizeOptionsPath as normalizeOptionsHashPath } from "./paths";
+
+const ProviderPlugins =
+  process.env.REACT_APP_CLIENT === "chrome" ||
+  process.env.REACT_APP_CLIENT === "firefox"
+    ? lazy(() => import("./ProviderPlugins"))
+    : UnsupportedProviderPlugins;
+
+function UnsupportedProviderPlugins() {
+  const i18n = useI18n();
+  return <Alert severity="info">{i18n("provider_plugins_unsupported")}</Alert>;
+}
+
+function LoadingProviderPlugins() {
+  const i18n = useI18n();
+  return <div>{i18n("provider_plugins_loading")}</div>;
+}
+const LocalAi = lazy(() => import("./LocalAi"));
+
+function FileTranslateRedirect() {
+  const i18n = useI18n();
+  useEffect(() => {
+    openFileTranslatePage();
+  }, []);
+
+  return (
+    <Box sx={{ p: 4, textAlign: "center" }}>
+      <Typography variant="body1" sx={{ mb: 2 }}>
+        {i18n(
+          "file_translate_redirect_notice",
+          "文件翻译已升级为独立全屏页面，正在新标签页中打开..."
+        )}
+      </Typography>
+      <Button
+        variant="contained"
+        startIcon={<OpenInNewRoundedIcon />}
+        onClick={() => openFileTranslatePage()}
+      >
+        {i18n("file_translate_open_new_tab", "在新标签页中打开文件翻译")}
+      </Button>
+    </Box>
+  );
+}
+
+function SyncBackdrop({ open }) {
+  return (
+    <Backdrop
+      data-testid="options-sync-backdrop"
+      aria-label="syncing required data"
+      role="status"
+      open={open}
+      sx={(theme) => ({
+        color: "#fff",
+        zIndex: theme.zIndex.modal + 1,
+      })}
+    >
+      <CircularProgress color="inherit" size={72} />
+    </Backdrop>
+  );
+}
+
+const OptionsSyncContext = createContext(OPTIONS_SYNC_KEYS);
+
+function OptionsContent({ children }) {
+  const pendingKeys = useContext(OptionsSyncContext);
+  const { pathname } = useLocation();
+  const syncing = getRequiredOptionsSyncKeys(pathname).some((key) =>
+    pendingKeys.includes(key)
+  );
+
+  return (
+    <>
+      <InteractionLock data-testid="options-content" locked={syncing}>
+        {children}
+      </InteractionLock>
+      <SyncBackdrop open={syncing} />
+    </>
+  );
+}
+
+function OptionsPlayground() {
+  const pendingKeys = useContext(OptionsSyncContext);
+  return (
+    <Playgound initialSettingsReady={!pendingKeys.includes(STOKEY_SETTING)} />
+  );
+}
+
+function OptionsRouter({ pendingKeys }) {
+  const [router, setRouter] = useState(null);
+  useEffect(() => {
+    // Data routing lets unsaved drafts block links, searches and browser Back.
+    const nextRouter = createHashRouter(
+      createRoutesFromElements(
+        <Route
+          path="/"
+          element={
+            <OptionsContent>
+              <AlertProvider>
+                <ConfirmProvider>
+                  <Layout />
+                </ConfirmProvider>
+              </AlertProvider>
+            </OptionsContent>
+          }
+        >
+          <Route index element={<Setting />} />
+          <Route path="rules" element={<Rules guardNavigation />} />
+          <Route path="styles" element={<StylesSetting />} />
+          <Route path="input" element={<InputSetting />} />
+          <Route path="tranbox" element={<Tranbox />} />
+          <Route path="mousehover" element={<MouseHoverSetting />} />
+          <Route path="subtitle" element={<SubtitleSetting />} />
+          <Route path="image-translate" element={<ImageTranslate />} />
+          <Route path="apis" element={<Apis />} />
+          <Route
+            path="plugins"
+            element={
+              <Suspense fallback={<LoadingProviderPlugins />}>
+                <ProviderPlugins />
+              </Suspense>
+            }
+          />
+          {isAutoTranslateClipboardSupported && (
+            <Route
+              path="local-ai"
+              element={
+                <Suspense fallback={null}>
+                  <LocalAi />
+                </Suspense>
+              }
+            />
+          )}
+          {isAutoTranslateClipboardSupported && (
+            <Route path="file-translate" element={<FileTranslateRedirect />} />
+          )}
+          <Route path="prompts" element={<Prompts />} />
+          <Route path="sync" element={<SyncSetting />} />
+          <Route path="words" element={<FavWords />} />
+          <Route path="playground" element={<OptionsPlayground />} />
+          <Route path="about" element={<About />} />
+          {isExt && <Route path="diagnostics" element={<Diagnostics />} />}
+        </Route>
+      )
+    );
+    setRouter(nextRouter);
+    return () => nextRouter.dispose();
+  }, []);
+
+  return (
+    <OptionsSyncContext.Provider value={pendingKeys}>
+      {router ? <RouterProvider router={router} /> : <SyncBackdrop open />}
+    </OptionsSyncContext.Provider>
+  );
+}
+
+export default function Options() {
+  const [error, setError] = useState("");
+  const [localStorageReady, setLocalStorageReady] = useState(false);
+  const [pendingKeys, setPendingKeys] = useState(OPTIONS_SYNC_KEYS);
+  const startupRef = useRef(null);
+
+  useEffect(() => {
+    let active = true;
+    // Reuse the work when StrictMode subscribes to this effect a second time.
+    if (!startupRef.current) startupRef.current = createOptionsStartup();
+    const reportError = (err) => {
+      if (active) setError(err?.message || String(err));
+    };
+
+    startupRef.current.localReady.then(() => {
+      if (active) setLocalStorageReady(true);
+    }, reportError);
+    Object.entries(startupRef.current.completed).forEach(([key, completed]) => {
+      completed.then(() => {
+        if (active) {
+          setPendingKeys((pending) => pending.filter((item) => item !== key));
+        }
+      }, reportError);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (error) {
+    return (
+      <center>
+        <Divider>
+          <Link
+            href={process.env.REACT_APP_HOMEPAGE}
+          >{`KISS Translator v${process.env.REACT_APP_VERSION}`}</Link>
+        </Divider>
+        <Alert severity="error">{error}</Alert>
+        {isGm && (
+          <Stack spacing={2}>
+            <Link href={process.env.REACT_APP_USERSCRIPT_DOWNLOADURL}>
+              Install/Update Userscript for Tampermonkey/Violentmonkey
+            </Link>
+            <Link href={process.env.REACT_APP_USERSCRIPT_IOS_DOWNLOADURL}>
+              Install/Update Userscript for iOS Safari
+            </Link>
+          </Stack>
+        )}
+      </center>
+    );
+  }
+
+  if (!localStorageReady) return <SyncBackdrop open />;
+
+  return (
+    <SettingProvider context="options">
+      <ThemeProvider>
+        <OptionsRouter pendingKeys={pendingKeys} />
+      </ThemeProvider>
+    </SettingProvider>
+  );
+}

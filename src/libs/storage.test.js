@@ -1,0 +1,816 @@
+// These storage fixtures use localStorage rather than extension storage.
+const originalClient = process.env.REACT_APP_CLIENT;
+process.env.REACT_APP_CLIENT = "web";
+afterAll(() => {
+  if (originalClient === undefined) delete process.env.REACT_APP_CLIENT;
+  else process.env.REACT_APP_CLIENT = originalClient;
+});
+
+const {
+  STOKEY_SETTING,
+  STOKEY_SETTING_BACKUP_V1_BEFORE_V2,
+  STOKEY_RULES,
+  STOKEY_RULES_IGNORE_MIGRATED,
+  STOKEY_SYNC,
+  KV_RULES_KEY,
+  SETTINGS_VERSION_V2,
+  SETTINGS_VERSION_V3,
+  SETTINGS_VERSION_V4,
+  CURRENT_SETTINGS_VERSION,
+  DEFAULT_VLM_PROMPT_SLUG,
+  DEFAULT_SUBTITLE_SETTING,
+  DEFAULT_API_LIST,
+  OPT_TRANS_BUILTINAI,
+  OPT_TRANS_DEEPSEEK,
+  OPT_TRANS_GOOGLE,
+  OPT_TRANS_GOOGLE_2,
+  OPT_TRANS_MICROSOFT,
+  OPT_TRANS_OPENAI,
+  OPT_TRANS_TENCENT,
+} = require("../config");
+const {
+  getSettingWithDefault,
+  runDataMigration,
+  saveEdit,
+} = require("./storage");
+
+// 存储测试不涉及流式解析，隔离 ESM-only 依赖以免 Jest 27 在加载阶段失败。
+jest.mock("@streamparser/json", () => ({ JSONParser: jest.fn() }));
+// jsdom 并非扩展页面，使用空实现避免 webextension-polyfill 在模块初始化时主动抛错。
+jest.mock("webextension-polyfill", () => ({}));
+
+const readStoredJson = (key) => JSON.parse(window.localStorage.getItem(key));
+
+function loadGmStorageModule() {
+  let storageModule;
+  jest.isolateModules(() => {
+    jest.doMock("./client", () => ({
+      isExt: false,
+      isGm: true,
+    }));
+    storageModule = require("./storage");
+  });
+  jest.dontMock("./client");
+  return storageModule;
+}
+
+describe("settings storage migration", () => {
+  test("existing service instances and scene choices are not supplemented by new install defaults", async () => {
+    const existing = {
+      version: CURRENT_SETTINGS_VERSION,
+      transApis: [
+        {
+          apiSlug: "mine",
+          apiType: "LocalAI",
+          apiName: "My service",
+          modelRef: "hy-mt2-1.8b",
+          device: "wasm",
+        },
+      ],
+      fileTranslateSetting: { pdf: { apiSlug: "mine" } },
+    };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(existing));
+    const setting = await getSettingWithDefault();
+    expect(setting.transApis).toHaveLength(1);
+    expect(setting.transApis[0]).toMatchObject(existing.transApis[0]);
+    expect(setting.fileTranslateSetting.pdf.apiSlug).toBe("mine");
+  });
+  beforeEach(() => {
+    window.localStorage.clear();
+    delete window.KISS_GM;
+    delete globalThis.GM;
+    delete globalThis.GM_setValue;
+    delete globalThis.GM_getValue;
+    delete globalThis.GM_deleteValue;
+  });
+
+  afterEach(() => {
+    delete globalThis.GM;
+    delete globalThis.GM_setValue;
+    delete globalThis.GM_getValue;
+    delete globalThis.GM_deleteValue;
+  });
+
+  test("runDataMigration backs up raw v1 settings and stores current settings", async () => {
+    const oldSetting = {
+      uiLang: "zh-CN",
+      transApis: [
+        {
+          apiSlug: "openai",
+          apiName: "OpenAI",
+          systemPrompt: "custom batch prompt",
+        },
+      ],
+    };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+
+    await runDataMigration();
+
+    const backup = readStoredJson(STOKEY_SETTING_BACKUP_V1_BEFORE_V2);
+    const stored = readStoredJson(STOKEY_SETTING);
+
+    expect(backup).toEqual(oldSetting);
+    expect(stored.version).toBe(CURRENT_SETTINGS_VERSION);
+    expect(stored.transApis[0].batchPromptSlug).toMatch(
+      /^prompt_migrated_batch_/
+    );
+    expect(stored.transApis[0]).not.toHaveProperty("systemPrompt");
+  });
+
+  test("does not migrate single-service rules into fallback lists", async () => {
+    const rules = [
+      { pattern: "*", apiSlug: "primary" },
+      { pattern: "example.com", apiSlug: "*" },
+    ];
+    window.localStorage.setItem(STOKEY_RULES, JSON.stringify(rules));
+    await runDataMigration();
+    expect(readStoredJson(STOKEY_RULES)).toMatchObject(rules);
+    expect(readStoredJson(STOKEY_RULES)[0]).not.toHaveProperty(
+      "fallbackApiSlugs"
+    );
+  });
+
+  test("migrates only global ignores once and preserves later edits", async () => {
+    const site = { pattern: "example.com", ignoreSelector: "-.notranslate" };
+    const globalRule = {
+      pattern: "*",
+      ignoreSelector: ".mine, svg, .mine",
+      apiSlug: "mine",
+    };
+    localStorage.setItem(STOKEY_RULES, JSON.stringify([globalRule, site]));
+    expect(await runDataMigration()).toBe(true);
+    const migrated = readStoredJson(STOKEY_RULES);
+    expect(migrated[0]).toEqual({
+      ...globalRule,
+      ignoreSelector:
+        ".mine, svg, address, select, option, .notranslate, [translate='no']",
+    });
+    expect(migrated[1]).toEqual(site);
+    expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBe(true);
+    migrated[0].ignoreSelector = ".mine";
+    localStorage.setItem(STOKEY_RULES, JSON.stringify(migrated));
+    await runDataMigration();
+    expect(readStoredJson(STOKEY_RULES)).toEqual(migrated);
+  });
+
+  test.each([
+    null,
+    {
+      syncUrl: "https://sync.example.invalid",
+      destinationRevision: 3,
+      syncMeta: {
+        [KV_RULES_KEY]: {
+          updateAt: 100,
+          syncAt: 80,
+          pendingUpload: true,
+          firstAttemptAt: 60,
+        },
+        unrelated: { updateAt: 300, syncAt: 200 },
+      },
+    },
+  ])(
+    "migration preserves sync metadata and user edits still advance it: %j",
+    async (sync) => {
+      const rules = [{ pattern: "*", ignoreSelector: ".mine" }];
+      localStorage.setItem(STOKEY_RULES, JSON.stringify(rules));
+      if (sync) localStorage.setItem(STOKEY_SYNC, JSON.stringify(sync));
+      const before = localStorage.getItem(STOKEY_SYNC);
+      expect(await runDataMigration()).toBe(true);
+      expect(localStorage.getItem(STOKEY_SYNC)).toBe(before);
+      expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBe(true);
+      await saveEdit(STOKEY_RULES, [
+        { ...rules[0], ignoreSelector: ".edited" },
+      ]);
+      expect(
+        readStoredJson(STOKEY_SYNC).syncMeta[KV_RULES_KEY].updateAt
+      ).toBeGreaterThan(sync?.syncMeta[KV_RULES_KEY].updateAt || 0);
+    }
+  );
+
+  test("invalid legacy selectors remain repairable without blocking other migrations", async () => {
+    const rules = [{ pattern: "*", ignoreSelector: "svg, [broken" }];
+    const bytes = JSON.stringify(rules);
+    localStorage.setItem(STOKEY_RULES, bytes);
+    localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({ version: SETTINGS_VERSION_V3, darkMode: true })
+    );
+    expect(await runDataMigration()).toBe(true);
+    expect(localStorage.getItem(STOKEY_RULES)).toBe(bytes);
+    expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBeNull();
+    expect(readStoredJson(STOKEY_SETTING)).toMatchObject({
+      version: CURRENT_SETTINGS_VERSION,
+      darkMode: "dark",
+    });
+    rules[0].ignoreSelector = ".repaired";
+    await saveEdit(STOKEY_RULES, rules);
+    expect(await runDataMigration()).toBe(true);
+    expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBe(true);
+    expect(readStoredJson(STOKEY_RULES)[0].ignoreSelector).toContain(
+      ".repaired"
+    );
+    expect(readStoredJson(STOKEY_RULES)[0].ignoreSelector).toContain(
+      "[translate='no']"
+    );
+  });
+
+  test.each([
+    "svg, [class*='logo'] svg, [id*='logo'] svg",
+    '[class*="logo"] svg, [id*="logo"] svg',
+  ])(
+    "removes redundant global logo SVG defaults during migration: %s",
+    async (legacy) => {
+      const site = {
+        pattern: "example.com",
+        ignoreSelector: "[class*='logo'] svg",
+      };
+      const rules = [
+        {
+          pattern: "*",
+          ignoreSelector: `${legacy}, img[src*='.svg'], .logo svg, .mine`,
+        },
+        site,
+      ];
+      localStorage.setItem(STOKEY_RULES, JSON.stringify(rules));
+      expect(await runDataMigration()).toBe(true);
+      const migrated = readStoredJson(STOKEY_RULES);
+      const { splitSelectorList } = require("./selectorList");
+      expect(splitSelectorList(migrated[0].ignoreSelector)).toEqual(
+        expect.arrayContaining([
+          "svg",
+          "img[src*='.svg']",
+          ".logo svg",
+          ".mine",
+        ])
+      );
+      expect(migrated[0].ignoreSelector).not.toMatch(/\[(?:class|id)\*=/);
+      expect(migrated[1]).toEqual(site);
+      migrated[0].ignoreSelector += ", [class*='logo'] svg";
+      localStorage.setItem(STOKEY_RULES, JSON.stringify(migrated));
+      await runDataMigration();
+      expect(readStoredJson(STOKEY_RULES)).toEqual(migrated);
+    }
+  );
+
+  test.each([null, [{ pattern: "example.com", ignoreSelector: ".mine" }]])(
+    "supplies global defaults when no global rule exists: %j",
+    async (rules) => {
+      if (rules) localStorage.setItem(STOKEY_RULES, JSON.stringify(rules));
+      expect(await runDataMigration()).toBe(true);
+      const { getRulesWithDefault } = require("./storage");
+      const migrated = await getRulesWithDefault();
+      expect(
+        migrated.find((rule) => rule.pattern === "*").ignoreSelector
+      ).toContain("[translate='no']");
+      if (rules) expect(migrated.slice(1)).toEqual(rules);
+      expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBe(true);
+    }
+  );
+
+  test("rolls back rule changes if the completion marker fails, then retries", async () => {
+    const rules = [{ pattern: "*", ignoreSelector: ".mine" }];
+    localStorage.setItem(STOKEY_RULES, JSON.stringify(rules));
+    const originalSet = Storage.prototype.setItem;
+    const write = jest
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(function (key, value) {
+        if (key === STOKEY_RULES_IGNORE_MIGRATED)
+          throw new Error("marker unavailable");
+        return originalSet.call(this, key, value);
+      });
+    try {
+      expect(await runDataMigration()).toBe(false);
+      expect(readStoredJson(STOKEY_RULES)).toEqual(rules);
+      expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBeNull();
+    } finally {
+      write.mockRestore();
+    }
+    expect(await runDataMigration()).toBe(true);
+    expect(readStoredJson(STOKEY_RULES_IGNORE_MIGRATED)).toBe(true);
+  });
+
+  test.each([
+    [true, "dark"],
+    [false, "light"],
+  ])(
+    "migrates boolean theme %p without changing current settings",
+    async (darkMode, expected) => {
+      const oldSetting = {
+        version: SETTINGS_VERSION_V3,
+        darkMode,
+        uiLang: "en",
+      };
+      window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+
+      await runDataMigration();
+
+      expect(readStoredJson(STOKEY_SETTING)).toMatchObject({
+        ...oldSetting,
+        version: CURRENT_SETTINGS_VERSION,
+        darkMode: expected,
+      });
+      expect(readStoredJson(STOKEY_SETTING_BACKUP_V1_BEFORE_V2)).toBe(null);
+    }
+  );
+
+  test("finishes schema and theme migration in one settings write", async () => {
+    const oldSetting = { version: SETTINGS_VERSION_V2, darkMode: true };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+    const setItem = jest.spyOn(window.Storage.prototype, "setItem");
+    try {
+      await runDataMigration();
+
+      expect(readStoredJson(STOKEY_SETTING)).toMatchObject({
+        version: CURRENT_SETTINGS_VERSION,
+        darkMode: "dark",
+      });
+      expect(
+        setItem.mock.calls.filter(([key]) => key === STOKEY_SETTING)
+      ).toHaveLength(1);
+      const writes = setItem.mock.calls.length;
+      await runDataMigration();
+      expect(setItem).toHaveBeenCalledTimes(writes);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  test("reports a failed migration write to callers that require ready storage", async () => {
+    globalThis.GM = {
+      getValue: jest.fn(async () =>
+        JSON.stringify({ version: SETTINGS_VERSION_V3, darkMode: true })
+      ),
+      setValue: jest.fn(async () => {
+        throw new Error("migration write failed");
+      }),
+      deleteValue: jest.fn(),
+    };
+    const { runDataMigration: migrateGmData } = loadGmStorageModule();
+
+    await expect(migrateGmData()).resolves.toBe(false);
+  });
+
+  test("getSettingWithDefault returns current settings for stored v1 data", async () => {
+    const oldSetting = {
+      uiLang: "zh",
+      transApis: [
+        {
+          apiSlug: "openai",
+          apiName: "OpenAI",
+          systemPrompt: "custom batch prompt",
+        },
+      ],
+    };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+
+    const setting = await getSettingWithDefault();
+
+    expect(setting.version).toBe(CURRENT_SETTINGS_VERSION);
+    expect(setting.transApis[0].batchPromptSlug).toMatch(
+      /^prompt_migrated_batch_/
+    );
+    expect(setting.transApis[0]).not.toHaveProperty("systemPrompt");
+  });
+
+  test.each([
+    [undefined, true, "dark"],
+    [SETTINGS_VERSION_V2, false, "light"],
+    [SETTINGS_VERSION_V3, true, "dark"],
+    [SETTINGS_VERSION_V3, "auto", "auto"],
+  ])(
+    "normalizes version %p and theme %p without persisting a migration",
+    async (version, darkMode, expected) => {
+      const oldSetting = { version, darkMode, uiLang: "en" };
+      const serialized = JSON.stringify(oldSetting);
+      window.localStorage.setItem(STOKEY_SETTING, serialized);
+      const setItem = jest.spyOn(window.Storage.prototype, "setItem");
+      try {
+        await expect(getSettingWithDefault()).resolves.toMatchObject({
+          version: CURRENT_SETTINGS_VERSION,
+          darkMode: expected,
+          uiLang: "en",
+        });
+        expect(setItem).not.toHaveBeenCalled();
+        expect(window.localStorage.getItem(STOKEY_SETTING)).toBe(serialized);
+        expect(oldSetting.darkMode).toBe(darkMode);
+      } finally {
+        setItem.mockRestore();
+      }
+    }
+  );
+
+  test.each([false, true])(
+    "migrates V4 visual references through storage (persist: %p)",
+    async (persist) => {
+      const oldSetting = {
+        version: SETTINGS_VERSION_V4,
+        uiLang: "en",
+        transApis: [
+          { apiSlug: "missing", apiType: OPT_TRANS_OPENAI, tone: "formal" },
+          {
+            apiSlug: "custom",
+            apiType: OPT_TRANS_OPENAI,
+            vlmPromptSlug: "mine",
+          },
+          { apiSlug: "empty", apiType: OPT_TRANS_OPENAI, vlmPromptSlug: "" },
+        ],
+        fileTranslateSetting: {
+          image: { ocrGroup: "old", promptSlug: "translation" },
+        },
+      };
+      const serialized = JSON.stringify(oldSetting);
+      window.localStorage.setItem(STOKEY_SETTING, serialized);
+      const setItem = jest.spyOn(window.Storage.prototype, "setItem");
+      try {
+        if (persist) await runDataMigration();
+        const setting = persist
+          ? readStoredJson(STOKEY_SETTING)
+          : await getSettingWithDefault();
+        expect(setting).toMatchObject({
+          version: CURRENT_SETTINGS_VERSION,
+          uiLang: "en",
+          transApis: [
+            {
+              apiSlug: "missing",
+              vlmPromptSlug: DEFAULT_VLM_PROMPT_SLUG,
+              tone: "formal",
+            },
+            { apiSlug: "custom", vlmPromptSlug: "mine" },
+            { apiSlug: "empty", vlmPromptSlug: "" },
+          ],
+          fileTranslateSetting: {
+            image: {
+              vlmPromptSlug: "",
+              ocrGroup: "old",
+              promptSlug: "translation",
+            },
+          },
+        });
+        if (persist) {
+          expect(setItem).toHaveBeenCalled();
+          setItem.mockClear();
+          await runDataMigration();
+          expect(setItem).not.toHaveBeenCalled();
+          expect(readStoredJson(STOKEY_SETTING)).toEqual(setting);
+        } else {
+          expect(setItem).not.toHaveBeenCalled();
+          expect(window.localStorage.getItem(STOKEY_SETTING)).toBe(serialized);
+        }
+      } finally {
+        setItem.mockRestore();
+      }
+    }
+  );
+
+  test("preserves explicit V4 image visual references through both storage entry points", async () => {
+    const oldSetting = {
+      version: SETTINGS_VERSION_V4,
+      fileTranslateSetting: { image: { vlmPromptSlug: "mine" } },
+    };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(oldSetting));
+    expect(
+      (await getSettingWithDefault()).fileTranslateSetting.image.vlmPromptSlug
+    ).toBe("mine");
+    await runDataMigration();
+    expect(
+      readStoredJson(STOKEY_SETTING).fileTranslateSetting.image.vlmPromptSlug
+    ).toBe("mine");
+  });
+
+  test("fills in new mouse hover hold defaults without overriding stored choices", async () => {
+    // 旧版本升级上来的设置：mouseHoverSetting 里没有本轮新增的键
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({
+        version: SETTINGS_VERSION_V3,
+        mouseHoverSetting: {
+          mouseHoverKeyHold: true,
+          mouseHoverHoldDelay: 500,
+        },
+      })
+    );
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      mouseHoverSetting: {
+        mouseHoverKeyHold: true,
+        mouseHoverHoldDelay: 500,
+        mouseHoverHoldButton: "left",
+        mouseHoverSuppressContextMenu: true,
+      },
+    });
+
+    // 用户已经改过的值必须保留
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({
+        version: SETTINGS_VERSION_V3,
+        mouseHoverSetting: {
+          mouseHoverHoldButton: "right",
+          mouseHoverSuppressContextMenu: false,
+        },
+      })
+    );
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      mouseHoverSetting: {
+        mouseHoverHoldButton: "right",
+        mouseHoverSuppressContextMenu: false,
+      },
+    });
+  });
+
+  test("merges the language variant default without overriding an explicit choice", async () => {
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({ version: SETTINGS_VERSION_V3, uiLang: "zh" })
+    );
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      translateVariants: true,
+    });
+
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({
+        version: SETTINGS_VERSION_V3,
+        translateVariants: false,
+      })
+    );
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      translateVariants: false,
+    });
+  });
+
+  test("keeps clipboard auto-translation opt-in for existing settings", async () => {
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({ version: SETTINGS_VERSION_V3, uiLang: "zh" })
+    );
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      autoTranslateClipboard: false,
+    });
+
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({
+        version: SETTINGS_VERSION_V3,
+        autoTranslateClipboard: true,
+      })
+    );
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      autoTranslateClipboard: true,
+    });
+  });
+
+  test("does not replace explicitly stored Tencent entry points", async () => {
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({
+        version: SETTINGS_VERSION_V3,
+        inputRule: { apiSlug: OPT_TRANS_TENCENT },
+        tranboxSetting: { apiSlugs: [OPT_TRANS_TENCENT] },
+        subtitleSetting: { apiSlug: OPT_TRANS_TENCENT },
+      })
+    );
+
+    await expect(getSettingWithDefault()).resolves.toMatchObject({
+      inputRule: { apiSlug: OPT_TRANS_TENCENT },
+      tranboxSetting: { apiSlugs: [OPT_TRANS_TENCENT] },
+      subtitleSetting: { apiSlug: OPT_TRANS_TENCENT },
+    });
+  });
+
+  test("keeps an explicitly stored subtitle chunk length", async () => {
+    // 新默认值只影响新配置；已有用户明确保存的 2000 不应被默认设置覆盖。
+    expect(DEFAULT_SUBTITLE_SETTING.chunkLength).toBe(1000);
+    window.localStorage.setItem(
+      STOKEY_SETTING,
+      JSON.stringify({
+        version: SETTINGS_VERSION_V2,
+        subtitleSetting: { chunkLength: 2000 },
+      })
+    );
+
+    const setting = await getSettingWithDefault();
+
+    expect(setting.subtitleSetting.chunkLength).toBe(2000);
+  });
+
+  test("normalizes legacy default thinking effort only in the loaded setting", async () => {
+    const storedSetting = {
+      version: SETTINGS_VERSION_V3,
+      transApis: [
+        {
+          apiSlug: "openai",
+          apiType: OPT_TRANS_OPENAI,
+          model: "gpt-5.6-sol",
+          thinkingMode: "enabled",
+          thinkingEffort: "_default",
+        },
+      ],
+    };
+    window.localStorage.setItem(STOKEY_SETTING, JSON.stringify(storedSetting));
+
+    const setting = await getSettingWithDefault();
+
+    expect(setting.transApis[0].thinkingEffort).toBeNull();
+    expect(readStoredJson(STOKEY_SETTING)).toEqual(storedSetting);
+  });
+
+  test("normalizes thinking settings for a fresh installation", async () => {
+    const setting = await getSettingWithDefault();
+    const deepseek = setting.transApis.find(
+      (api) => api.apiType === OPT_TRANS_DEEPSEEK
+    );
+
+    expect(deepseek).toMatchObject({
+      thinkingMode: "disabled",
+      thinkingEffort: null,
+    });
+  });
+
+  test("enables only the initial four services for a fresh installation", async () => {
+    const setting = await getSettingWithDefault();
+
+    expect(setting.transApis).toHaveLength(DEFAULT_API_LIST.length);
+    expect(
+      setting.transApis
+        .filter((api) => !api.isDisabled)
+        .map((api) => api.apiType)
+    ).toEqual([
+      OPT_TRANS_BUILTINAI,
+      OPT_TRANS_GOOGLE,
+      OPT_TRANS_GOOGLE_2,
+      OPT_TRANS_MICROSOFT,
+    ]);
+  });
+
+  test.each([1, SETTINGS_VERSION_V2, SETTINGS_VERSION_V3])(
+    "preserves saved service activation choices from settings version %p",
+    async (version) => {
+      const savedApis = [
+        {
+          ...DEFAULT_API_LIST.find((api) => api.apiType === OPT_TRANS_OPENAI),
+          isDisabled: false,
+          sortOrder: -1,
+          key: "saved-key",
+        },
+        {
+          ...DEFAULT_API_LIST.find(
+            (api) => api.apiType === OPT_TRANS_MICROSOFT
+          ),
+          isDisabled: true,
+          sortOrder: 999,
+        },
+        {
+          apiSlug: "legacy-tencent",
+          apiType: OPT_TRANS_TENCENT,
+        },
+      ];
+      const storedSetting = { version, transApis: savedApis };
+      window.localStorage.setItem(
+        STOKEY_SETTING,
+        JSON.stringify(storedSetting)
+      );
+
+      const setting = await getSettingWithDefault();
+
+      expect(setting.transApis).toHaveLength(
+        version < SETTINGS_VERSION_V4 ? savedApis.length + 2 : savedApis.length
+      );
+      savedApis.forEach((savedApi, index) => {
+        const loadedApi = setting.transApis[index];
+        [
+          "apiSlug",
+          "apiName",
+          "apiType",
+          "isDisabled",
+          "sortOrder",
+          "key",
+        ].forEach((field) => {
+          if (Object.prototype.hasOwnProperty.call(savedApi, field)) {
+            expect(loadedApi).toHaveProperty(field, savedApi[field]);
+          } else {
+            expect(loadedApi).not.toHaveProperty(field);
+          }
+        });
+      });
+      expect(readStoredJson(STOKEY_SETTING)).toEqual(storedSetting);
+    }
+  );
+
+  test.each(["none", "minimal", "_default"])(
+    "loads legacy Astra disabled effort %s as low without rewriting storage",
+    async (thinkingEffort) => {
+      const storedSetting = {
+        version: SETTINGS_VERSION_V3,
+        transApis: [
+          {
+            apiSlug: "openai",
+            apiType: OPT_TRANS_OPENAI,
+            model: "gpt-6-astra",
+            thinkingMode: "disabled",
+            thinkingEffort,
+          },
+        ],
+      };
+      window.localStorage.setItem(
+        STOKEY_SETTING,
+        JSON.stringify(storedSetting)
+      );
+      const setting = await getSettingWithDefault();
+      expect(setting.transApis[0].thinkingEffort).toBe("low");
+      expect(readStoredJson(STOKEY_SETTING)).toEqual(storedSetting);
+    }
+  );
+
+  test("GM storage reports a clear error when GM APIs are unavailable", async () => {
+    const { storage } = loadGmStorageModule();
+
+    await expect(storage.get("missing-gm")).rejects.toThrow(
+      "GM API is not available"
+    );
+  });
+
+  test("GM storage uses KISS_GM when it is available", async () => {
+    const stored = new Map();
+    window.KISS_GM = {
+      setValue: jest.fn(async (key, value) => stored.set(key, value)),
+      getValue: jest.fn(async (key) => stored.get(key)),
+      deleteValue: jest.fn(async (key) => stored.delete(key)),
+    };
+    globalThis.GM = {
+      setValue: jest.fn(),
+      getValue: jest.fn(),
+      deleteValue: jest.fn(),
+    };
+    const { storage } = loadGmStorageModule();
+
+    await storage.setObj("gm-key", { local: true });
+    await expect(storage.getObj("gm-key")).resolves.toEqual({ local: true });
+    await storage.del("gm-key");
+
+    expect(window.KISS_GM.setValue).toHaveBeenCalledWith(
+      "gm-key",
+      JSON.stringify({ local: true })
+    );
+    expect(window.KISS_GM.getValue).toHaveBeenCalledWith("gm-key");
+    expect(window.KISS_GM.deleteValue).toHaveBeenCalledWith("gm-key");
+    expect(globalThis.GM.setValue).not.toHaveBeenCalled();
+    expect(globalThis.GM.getValue).not.toHaveBeenCalled();
+    expect(globalThis.GM.deleteValue).not.toHaveBeenCalled();
+    expect(stored.has("gm-key")).toBe(false);
+  });
+
+  test("GM storage uses native GM storage APIs without KISS_GM", async () => {
+    const stored = new Map();
+    globalThis.GM = {
+      setValue: jest.fn(async (key, value) => stored.set(key, value)),
+      getValue: jest.fn(async (key) => stored.get(key)),
+      deleteValue: jest.fn(async (key) => stored.delete(key)),
+    };
+    globalThis.GM_setValue = jest.fn();
+    globalThis.GM_getValue = jest.fn();
+    globalThis.GM_deleteValue = jest.fn();
+    const { storage } = loadGmStorageModule();
+
+    await storage.setObj("native-gm-key", { ios: true });
+    await expect(storage.getObj("native-gm-key")).resolves.toEqual({
+      ios: true,
+    });
+    await storage.del("native-gm-key");
+
+    expect(globalThis.GM.setValue).toHaveBeenCalledWith(
+      "native-gm-key",
+      JSON.stringify({ ios: true })
+    );
+    expect(globalThis.GM.getValue).toHaveBeenCalledWith("native-gm-key");
+    expect(globalThis.GM.deleteValue).toHaveBeenCalledWith("native-gm-key");
+    expect(globalThis.GM_setValue).not.toHaveBeenCalled();
+    expect(globalThis.GM_getValue).not.toHaveBeenCalled();
+    expect(globalThis.GM_deleteValue).not.toHaveBeenCalled();
+    expect(stored.has("native-gm-key")).toBe(false);
+  });
+
+  test("GM storage falls back to legacy GM storage APIs", async () => {
+    const stored = new Map();
+    globalThis.GM = {};
+    globalThis.GM_setValue = jest.fn(async (key, value) =>
+      stored.set(key, value)
+    );
+    globalThis.GM_getValue = jest.fn(async (key) => stored.get(key));
+    globalThis.GM_deleteValue = jest.fn(async (key) => stored.delete(key));
+    const { storage } = loadGmStorageModule();
+
+    await storage.setObj("legacy-gm-key", { ios: true });
+    await expect(storage.getObj("legacy-gm-key")).resolves.toEqual({
+      ios: true,
+    });
+    await storage.del("legacy-gm-key");
+
+    expect(globalThis.GM_setValue).toHaveBeenCalledWith(
+      "legacy-gm-key",
+      JSON.stringify({ ios: true })
+    );
+    expect(globalThis.GM_getValue).toHaveBeenCalledWith("legacy-gm-key");
+    expect(globalThis.GM_deleteValue).toHaveBeenCalledWith("legacy-gm-key");
+    expect(stored.has("legacy-gm-key")).toBe(false);
+  });
+});

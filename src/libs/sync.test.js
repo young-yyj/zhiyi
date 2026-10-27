@@ -1,0 +1,803 @@
+jest.mock("../config", () => ({
+  ...jest.requireActual("../config/client"),
+  ...jest.requireActual("../config/prompt"),
+  APP_LCNAME: "kiss-translator",
+  KV_SETTING_KEY: "kiss-setting_v2.json",
+  KV_RULES_KEY: "kiss-rules_v2.json",
+  KV_WORDS_KEY: "kiss-words.json",
+  STOKEY_SETTING: "setting",
+  STOKEY_RULES: "rules",
+  STOKEY_WORDS: "words",
+  STOKEY_SYNC: "sync",
+  KV_RULES_SHARE_KEY: "kiss-rules-share_v2.json",
+  KV_SALT_SHARE: "share-salt",
+  OPT_SYNCTYPE_WEBDAV: "WebDAV",
+  OPT_SYNCTYPE_GIST: "GitHub Gist",
+}));
+
+jest.mock("./storage", () => ({
+  getSyncWithDefault: jest.fn(),
+  putSync: jest.fn(),
+  updateSyncState: jest.fn(),
+  getSettingWithDefault: jest.fn(),
+  getRulesWithDefault: jest.fn(),
+  getWordsWithDefault: jest.fn(),
+  getSetting: jest.fn(),
+  getRules: jest.fn(),
+  getWords: jest.fn(),
+  setSetting: jest.fn(),
+  setRules: jest.fn(),
+  setWords: jest.fn(),
+  storage: { withTransaction: jest.fn(), readSyncSnapshot: jest.fn() },
+}));
+
+jest.mock("../apis", () => ({
+  apiSyncData: jest.fn(),
+  apiCreateGist: jest.fn(),
+  apiListGists: jest.fn(),
+  apiGetGist: jest.fn(),
+  apiUpdateGistFile: jest.fn(),
+  apiFetchText: jest.fn(),
+}));
+
+jest.mock("./utils", () => ({
+  sha256: jest.fn(),
+  removeEndchar: jest.fn((value) => value.replace(/\/$/, "")),
+}));
+
+jest.mock("webdav", () => ({
+  createClient: jest.fn(),
+  getPatcher: jest.fn(() => ({
+    patch: jest.fn(),
+  })),
+}));
+
+jest.mock("./fetch", () => ({
+  fetchPatcher: jest.fn(),
+}));
+
+jest.mock("./log", () => jest.requireActual("../testUtils/scopedLogMock").withScopedLogMock((() => ({
+  kissLog: jest.fn(),
+}))()));
+
+jest.mock("./syncCrypto", () => ({
+  encryptSyncValue: jest.fn(),
+  decryptSyncValue: jest.fn(),
+}));
+
+import { changeSyncEncryptKey, syncData, syncSettingAndRules } from "./sync";
+import {
+  apiCreateGist,
+  apiGetGist,
+  apiListGists,
+  apiUpdateGistFile,
+} from "../apis";
+import {
+  getSettingWithDefault,
+  getRulesWithDefault,
+  getSyncWithDefault,
+  getWordsWithDefault,
+  putSync,
+  setSetting,
+  setRules,
+  setWords,
+  updateSyncState,
+  storage,
+} from "./storage";
+import { decryptSyncValue, encryptSyncValue } from "./syncCrypto";
+import { createClient, getPatcher } from "webdav";
+
+const SYNC_DESCRIPTION = "kiss translator sync files";
+const SYNC_KEY = "github-token";
+const SYNC_ENCRYPT_KEY = "sync-encrypt-passphrase";
+const RECOVERY_OLD_ENCRYPT_KEY = "recovery-old-passphrase";
+const NEW_SYNC_ENCRYPT_KEY = "new-sync-encrypt-passphrase";
+const SETTING_KEY = "kiss-setting_v2.json";
+const RULES_KEY = "kiss-rules_v2.json";
+const WORDS_KEY = "kiss-words.json";
+
+beforeEach(() => {
+  const transaction = {
+    getObj: () => getSyncWithDefault(),
+    setObj: (key, value) =>
+      ({
+        setting: setSetting,
+        rules: setRules,
+        words: setWords,
+      })[key](value),
+  };
+  storage.withTransaction.mockImplementation((operation) =>
+    operation(transaction)
+  );
+  storage.readSyncSnapshot.mockImplementation(async (key) => ({
+    value: await {
+      setting: getSettingWithDefault,
+      rules: getRulesWithDefault,
+      words: getWordsWithDefault,
+    }[key](),
+    syncConfig: await getSyncWithDefault(),
+  }));
+  updateSyncState.mockImplementation(async (updater) => {
+    const current = await getSyncWithDefault();
+    const next = await updater(current, transaction);
+    if (next !== undefined) await putSync({ syncMeta: next.syncMeta });
+    return next ?? current;
+  });
+});
+
+const gistFileContent = (value, updateAt) =>
+  JSON.stringify({
+    key: SETTING_KEY,
+    value: JSON.stringify(value),
+    updateAt,
+  });
+
+const encryptedGistFileContent = (value, updateAt) =>
+  JSON.stringify({
+    key: SETTING_KEY,
+    value: `cipher:${Buffer.from(JSON.stringify(value)).toString("base64")}`,
+    updateAt,
+  });
+
+describe("WebDAV sync", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    getPatcher.mockReturnValue({ patch: jest.fn() });
+    encryptSyncValue.mockImplementation((value) =>
+      Promise.resolve(`cipher:${Buffer.from(value).toString("base64")}`)
+    );
+    decryptSyncValue.mockImplementation((value) =>
+      Promise.resolve({
+        value: Buffer.from(value.slice("cipher:".length), "base64").toString(),
+        encrypted: true,
+      })
+    );
+  });
+
+  test("applies different remote data with an equal initial timestamp", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "WebDAV",
+      syncUrl: "https://dav.example.com",
+      syncUser: "user",
+      syncKey: "password",
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {},
+    });
+    const client = {
+      exists: jest.fn().mockResolvedValue(true),
+      getFileContents: jest.fn().mockResolvedValue(
+        JSON.stringify({
+          key: SETTING_KEY,
+          value: `cipher:${Buffer.from(
+            JSON.stringify({ remote: true })
+          ).toString("base64")}`,
+          updateAt: 0,
+        })
+      ),
+      putFileContents: jest.fn(),
+    };
+    createClient.mockReturnValue(client);
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(client.putFileContents).not.toHaveBeenCalled();
+    expect(result).toEqual({ value: { remote: true }, isNew: true });
+  });
+
+  test("does not mark equal-timestamp legacy remote data as new after a prior sync", async () => {
+    const remoteLegacySetting = {
+      version: 1,
+      transApis: [{ systemPrompt: "legacy inline prompt" }],
+    };
+    const localMigratedSetting = {
+      version: 3,
+      prompts: [{ slug: "migrated-prompt" }],
+      transApis: [{ batchPromptSlug: "migrated-prompt" }],
+    };
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "WebDAV",
+      syncUrl: "https://dav.example.com",
+      syncUser: "user",
+      syncKey: "password",
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 100,
+          syncAt: 1,
+        },
+      },
+    });
+    const client = {
+      exists: jest.fn().mockResolvedValue(true),
+      getFileContents: jest.fn().mockResolvedValue(
+        JSON.stringify({
+          key: SETTING_KEY,
+          value: `cipher:${Buffer.from(
+            JSON.stringify(remoteLegacySetting)
+          ).toString("base64")}`,
+          updateAt: 100,
+        })
+      ),
+      putFileContents: jest.fn(),
+    };
+    createClient.mockReturnValue(client);
+
+    const result = await syncData(SETTING_KEY, localMigratedSetting);
+
+    expect(client.putFileContents).not.toHaveBeenCalled();
+    expect(result.isNew).toBe(false);
+  });
+});
+
+describe("GitHub Gist sync", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    encryptSyncValue.mockImplementation((value) =>
+      Promise.resolve(`cipher:${Buffer.from(value).toString("base64")}`)
+    );
+    decryptSyncValue.mockImplementation((value) => {
+      if (value.startsWith("bad-cipher:")) {
+        return Promise.reject(new Error("decrypt failed"));
+      }
+      if (value.startsWith("cipher:")) {
+        return Promise.resolve({
+          value: Buffer.from(
+            value.slice("cipher:".length),
+            "base64"
+          ).toString(),
+          encrypted: true,
+        });
+      }
+      return Promise.resolve({ value, encrypted: false });
+    });
+    jest.spyOn(Date, "now").mockReturnValue(1000);
+  });
+
+  afterEach(() => {
+    Date.now.mockRestore();
+  });
+
+  test("skips sync when encryption passphrase is missing", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: "",
+      syncMeta: {},
+    });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(result).toBeUndefined();
+    expect(apiGetGist).not.toHaveBeenCalled();
+    expect(encryptSyncValue).not.toHaveBeenCalled();
+  });
+
+  test("uses the current automatic-sync preference instead of a queued snapshot", async () => {
+    const snapshot = {
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      autoSync: true,
+    };
+    getSyncWithDefault.mockResolvedValue({ ...snapshot, autoSync: false });
+
+    expect(
+      await syncData(
+        SETTING_KEY,
+        { local: true },
+        {
+          automatic: true,
+          syncConfig: snapshot,
+        }
+      )
+    ).toBeUndefined();
+    expect(apiGetGist).not.toHaveBeenCalled();
+    expect(encryptSyncValue).not.toHaveBeenCalled();
+  });
+
+  test.each([undefined, true])(
+    "automatic sync remains enabled when autoSync is %s",
+    async (autoSync) => {
+      getSyncWithDefault.mockResolvedValue({
+        syncType: "GitHub Gist",
+        syncUrl: "existing-gist",
+        syncKey: SYNC_KEY,
+        syncEncryptKey: SYNC_ENCRYPT_KEY,
+        autoSync,
+      });
+      apiGetGist.mockResolvedValue({ files: {} });
+      await syncData(SETTING_KEY, { local: true }, { automatic: true });
+      expect(apiUpdateGistFile).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  test("does not upload when automatic sync is disabled during Gist discovery", async () => {
+    const config = {
+      syncType: "GitHub Gist",
+      syncUrl: "",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+    };
+    getSyncWithDefault.mockResolvedValue(config);
+    apiListGists.mockImplementationOnce(async () => {
+      getSyncWithDefault.mockResolvedValue({ ...config, autoSync: false });
+      return [];
+    });
+
+    expect(
+      await syncData(SETTING_KEY, { local: true }, { automatic: true })
+    ).toBeUndefined();
+    expect(apiCreateGist).not.toHaveBeenCalled();
+    expect(apiUpdateGistFile).not.toHaveBeenCalled();
+  });
+
+  test("reuses the newest existing fixed-description gist when syncUrl is empty", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 100,
+          syncAt: 1,
+        },
+      },
+    });
+    apiListGists.mockResolvedValue([
+      {
+        id: "legacy-timestamped",
+        description: `${SYNC_DESCRIPTION}-1780891711256`,
+        updated_at: "2026-06-08T01:00:00Z",
+      },
+      {
+        id: "fixed-old",
+        description: SYNC_DESCRIPTION,
+        updated_at: "2026-06-08T02:00:00Z",
+      },
+      {
+        id: "fixed-new",
+        description: SYNC_DESCRIPTION,
+        updated_at: "2026-06-08T03:00:00Z",
+      },
+    ]);
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: gistFileContent({ remote: true }, 200),
+        },
+      },
+    });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(apiCreateGist).not.toHaveBeenCalled();
+    expect(apiGetGist).toHaveBeenCalledWith("fixed-new", SYNC_KEY);
+    expect(putSync).toHaveBeenCalledWith(
+      { syncUrl: "fixed-new" },
+      {
+        preserveDestination: true,
+        expectedDestinationRevision: 0,
+      }
+    );
+    expect(result).toEqual({ value: { remote: true }, isNew: true });
+  });
+
+  test("creates one fixed-description gist when syncUrl is empty and none exists", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {},
+    });
+    apiListGists.mockResolvedValue([]);
+    apiCreateGist.mockResolvedValue({ id: "created-gist" });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(apiCreateGist).toHaveBeenCalledWith(
+      SYNC_KEY,
+      {
+        key: SETTING_KEY,
+        content: JSON.stringify(
+          {
+            key: SETTING_KEY,
+            value: `cipher:${Buffer.from(
+              JSON.stringify({ local: true })
+            ).toString("base64")}`,
+            updateAt: 0,
+          },
+          null,
+          2
+        ),
+      },
+      SYNC_DESCRIPTION
+    );
+    expect(putSync).toHaveBeenCalledWith(
+      { syncUrl: "created-gist" },
+      {
+        preserveDestination: true,
+        expectedDestinationRevision: 0,
+      }
+    );
+    expect(encryptSyncValue).toHaveBeenCalledWith(
+      JSON.stringify({ local: true }),
+      SYNC_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).not.toHaveBeenCalledWith(
+      expect.any(String),
+      SYNC_KEY
+    );
+    expect(result).toEqual({ value: { local: true }, isNew: false });
+  });
+
+  test("returns remote value when an existing gist file is newer", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "https://gist.github.com/fishjar/existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 10,
+          syncAt: 1,
+        },
+      },
+    });
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: encryptedGistFileContent({ remote: true }, 50),
+        },
+      },
+    });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(apiListGists).not.toHaveBeenCalled();
+    expect(apiUpdateGistFile).not.toHaveBeenCalled();
+    expect(result).toEqual({ value: { remote: true }, isNew: true });
+  });
+
+  test("decrypts encrypted remote value when an existing gist file is newer", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 10,
+          syncAt: 1,
+        },
+      },
+    });
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: encryptedGistFileContent({ remote: true }, 50),
+        },
+      },
+    });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(apiUpdateGistFile).not.toHaveBeenCalled();
+    expect(decryptSyncValue).toHaveBeenCalledWith(
+      expect.any(String),
+      SYNC_ENCRYPT_KEY
+    );
+    expect(decryptSyncValue).not.toHaveBeenCalledWith(
+      expect.any(String),
+      SYNC_KEY
+    );
+    expect(result).toEqual({ value: { remote: true }, isNew: true });
+  });
+
+  test("migrates newer legacy plaintext gist data to encrypted content", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 10,
+          syncAt: 1,
+        },
+      },
+    });
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: gistFileContent({ remote: true }, 50),
+        },
+      },
+    });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(apiUpdateGistFile).toHaveBeenCalledWith(
+      "existing-gist",
+      SYNC_KEY,
+      SETTING_KEY,
+      JSON.stringify(
+        {
+          key: SETTING_KEY,
+          value: `cipher:${Buffer.from(
+            JSON.stringify({ remote: true })
+          ).toString("base64")}`,
+          updateAt: 50,
+        },
+        null,
+        2
+      )
+    );
+    expect(result).toEqual({ value: { remote: true }, isNew: true });
+  });
+
+  test("patches the existing gist file when local data is newer", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 200,
+          syncAt: 1,
+        },
+      },
+    });
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: gistFileContent({ remote: true }, 100),
+        },
+      },
+    });
+
+    const result = await syncData(SETTING_KEY, { local: true });
+
+    expect(apiUpdateGistFile).toHaveBeenCalledWith(
+      "existing-gist",
+      SYNC_KEY,
+      SETTING_KEY,
+      JSON.stringify(
+        {
+          key: SETTING_KEY,
+          value: `cipher:${Buffer.from(
+            JSON.stringify({ local: true })
+          ).toString("base64")}`,
+          updateAt: 200,
+        },
+        null,
+        2
+      )
+    );
+    expect(result).toEqual({ value: { local: true }, isNew: false });
+  });
+
+  test("replaces older legacy plaintext gist data with encrypted local content", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 200,
+          syncAt: 1,
+        },
+      },
+    });
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: gistFileContent({ remote: true }, 100),
+        },
+      },
+    });
+
+    await syncData(SETTING_KEY, { local: true });
+
+    const uploadedContent = apiUpdateGistFile.mock.calls[0][3];
+    expect(uploadedContent).not.toContain('"local":true');
+    expect(JSON.parse(uploadedContent).value).toMatch(/^cipher:/);
+  });
+
+  test("stops setting sync when encrypted remote data cannot be decrypted", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 10,
+          syncAt: 1,
+        },
+      },
+    });
+    getSettingWithDefault.mockResolvedValue({ local: true });
+    apiGetGist.mockResolvedValue({
+      files: {
+        [SETTING_KEY]: {
+          content: JSON.stringify({
+            key: SETTING_KEY,
+            value: "bad-cipher:value",
+            updateAt: 50,
+          }),
+        },
+      },
+    });
+
+    await expect(syncSettingAndRules()).rejects.toThrow("decrypt failed");
+
+    expect(setSetting).not.toHaveBeenCalled();
+    expect(apiUpdateGistFile).not.toHaveBeenCalled();
+  });
+
+  test("changes encryption passphrase after re-encrypting personal sync data", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      autoSync: false,
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 200,
+          syncAt: 1,
+        },
+        [RULES_KEY]: {
+          updateAt: 201,
+          syncAt: 1,
+        },
+        [WORDS_KEY]: {
+          updateAt: 202,
+          syncAt: 1,
+        },
+      },
+    });
+    getSettingWithDefault.mockResolvedValue({ setting: true });
+    getRulesWithDefault.mockResolvedValue([{ pattern: "*" }]);
+    getWordsWithDefault.mockResolvedValue({ hello: true });
+    apiGetGist.mockResolvedValue({ files: {} });
+
+    Date.now.mockReturnValue(9999);
+
+    await changeSyncEncryptKey({
+      oldEncryptKey: SYNC_ENCRYPT_KEY,
+      newEncryptKey: NEW_SYNC_ENCRYPT_KEY,
+    });
+
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({ setting: true }),
+      SYNC_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify([{ pattern: "*" }]),
+      SYNC_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      3,
+      JSON.stringify({ hello: true }),
+      SYNC_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      4,
+      JSON.stringify({ setting: true }),
+      NEW_SYNC_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      5,
+      JSON.stringify([{ pattern: "*" }]),
+      NEW_SYNC_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      6,
+      JSON.stringify({ hello: true }),
+      NEW_SYNC_ENCRYPT_KEY
+    );
+    const uploadedSetting = JSON.parse(apiUpdateGistFile.mock.calls[3][3]);
+    const uploadedRules = JSON.parse(apiUpdateGistFile.mock.calls[4][3]);
+    const uploadedWords = JSON.parse(apiUpdateGistFile.mock.calls[5][3]);
+    expect(uploadedSetting.updateAt).toBe(9999);
+    expect(uploadedRules.updateAt).toBe(9999);
+    expect(uploadedWords.updateAt).toBe(9999);
+    expect(putSync).toHaveBeenCalledWith({
+      syncMeta: expect.objectContaining({
+        [SETTING_KEY]: {
+          updateAt: 9999,
+          syncAt: 9999,
+        },
+      }),
+    });
+    expect(putSync).toHaveBeenCalledWith({
+      syncMeta: expect.objectContaining({
+        [RULES_KEY]: {
+          updateAt: 9999,
+          syncAt: 9999,
+        },
+      }),
+    });
+    expect(putSync).toHaveBeenCalledWith({
+      syncMeta: expect.objectContaining({
+        [WORDS_KEY]: {
+          updateAt: 9999,
+          syncAt: 9999,
+        },
+      }),
+    });
+    expect(putSync).toHaveBeenLastCalledWith(
+      {
+        syncEncryptKey: NEW_SYNC_ENCRYPT_KEY,
+      },
+      { preserveDestination: true }
+    );
+  });
+
+  test("keeps old encryption passphrase when re-encryption fails", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: SYNC_ENCRYPT_KEY,
+      syncMeta: {
+        [SETTING_KEY]: {
+          updateAt: 200,
+          syncAt: 1,
+        },
+      },
+    });
+    getSettingWithDefault.mockResolvedValue({ setting: true });
+    apiGetGist.mockResolvedValue({ files: {} });
+    apiUpdateGistFile.mockRejectedValue(new Error("upload failed"));
+
+    await expect(
+      changeSyncEncryptKey({
+        oldEncryptKey: SYNC_ENCRYPT_KEY,
+        newEncryptKey: NEW_SYNC_ENCRYPT_KEY,
+      })
+    ).rejects.toThrow("upload failed");
+
+    expect(putSync).not.toHaveBeenCalledWith({
+      syncEncryptKey: NEW_SYNC_ENCRYPT_KEY,
+    });
+  });
+
+  test("uses the supplied old passphrase instead of a stale local passphrase", async () => {
+    getSyncWithDefault.mockResolvedValue({
+      syncType: "GitHub Gist",
+      syncUrl: "existing-gist",
+      syncKey: SYNC_KEY,
+      syncEncryptKey: "stale-local-passphrase",
+      syncMeta: {},
+    });
+    getSettingWithDefault.mockResolvedValue({ setting: true });
+    getRulesWithDefault.mockResolvedValue([]);
+    getWordsWithDefault.mockResolvedValue({});
+    apiGetGist.mockResolvedValue({ files: {} });
+
+    await changeSyncEncryptKey({
+      oldEncryptKey: RECOVERY_OLD_ENCRYPT_KEY,
+      newEncryptKey: NEW_SYNC_ENCRYPT_KEY,
+    });
+
+    expect(encryptSyncValue).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({ setting: true }),
+      RECOVERY_OLD_ENCRYPT_KEY
+    );
+    expect(encryptSyncValue).not.toHaveBeenCalledWith(
+      JSON.stringify({ setting: true }),
+      "stale-local-passphrase"
+    );
+  });
+});

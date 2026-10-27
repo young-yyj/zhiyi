@@ -1,0 +1,674 @@
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import createCache from "@emotion/cache";
+import { CacheProvider } from "@emotion/react";
+import fs from "fs";
+import path from "path";
+import SubtitleSegmentationPlayground from "./SubtitleSegmentationPlayground";
+import { handleSubtitle } from "../../apis/trans";
+import { I18N, UI_LANGS } from "../../config/i18n";
+import { downloadBlobFile } from "../../libs/utils";
+import { __resetSessionHeightMapForTests } from "../../hooks/useTextareaHeightLock";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const mockConfirm = jest.fn(() => Promise.resolve(true));
+
+jest.mock("../../apis/trans", () => ({
+  detectSubtitleProtocol: () => "boundary-v3",
+  handleSubtitle: jest.fn(),
+}));
+
+jest.mock("../../hooks/Confirm", () => ({
+  useConfirm: () => mockConfirm,
+}));
+
+jest.mock("../../hooks/I18n", () => ({
+  // 组件测试固定使用中文备用文案，避免依赖完整的设置上下文。
+  useI18n:
+    () =>
+    (_, fallback = "") =>
+      fallback,
+}));
+
+jest.mock("../../libs/utils", () => {
+  const actual = jest.requireActual("../../libs/utils");
+  return { ...actual, downloadBlobFile: jest.fn() };
+});
+
+// 手柄样式：部分 mock（requireActual 保留真实默认导出），只替换
+// useTextareaGripStyle 驱动自绘样式行为。
+// 同时最小 mock ./Setting：斩断 requireActual(真实 hook) → ./Setting → Storage →
+// apis → query-string(ESM) 的未转译链；真实默认导出不调用 useSetting，零影响。
+jest.mock("../../hooks/Setting", () => ({
+  useSetting: () => ({ setting: {} }),
+}));
+const mockUseTextareaGripStyle = jest.fn(() => "concentric-smooth");
+jest.mock("../../hooks/useTextareaHeightLock", () => {
+  const actual = jest.requireActual("../../hooks/useTextareaHeightLock");
+  return {
+    ...actual,
+    __esModule: true,
+    useTextareaGripStyle: () => mockUseTextareaGripStyle(),
+  };
+});
+
+/** 等待 React effect 和异步事件处理器完成一次状态提交。 */
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+/** 通过 MUI 下拉菜单选择本地字幕的明确源语言。 */
+async function selectSourceLanguage(container, language) {
+  const languageSelect = container.querySelectorAll('[role="combobox"]')[1];
+  await act(async () => {
+    languageSelect.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, button: 0 })
+    );
+    await Promise.resolve();
+  });
+  const option = document.body.querySelector(`[data-value="${language}"]`);
+  await act(async () => {
+    option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
+function renderPlayground({ subtitleSetting, transApis = [] } = {}) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  act(() => {
+    root.render(
+      <SubtitleSegmentationPlayground
+        subtitleSetting={
+          subtitleSetting || {
+            segSlug: "-",
+            useAlgorithmBreaker: "rule",
+            longSentenceThreshold: 120,
+            toLang: "zh-CN",
+          }
+        }
+        transApis={transApis}
+        prompts={[]}
+      />
+    );
+  });
+  return { container, root };
+}
+
+describe("SubtitleSegmentationPlayground", () => {
+  const source = JSON.stringify({
+    lang: "en",
+    events: [
+      {
+        tStartMs: 0,
+        dDurationMs: 1000,
+        segs: [{ utf8: "Hello world." }],
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    handleSubtitle.mockReset();
+    mockConfirm.mockClear();
+    mockConfirm.mockResolvedValue(true);
+    downloadBlobFile.mockReset();
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: 1, samples: [] }),
+    });
+  });
+
+  test("covers every page copy key in all supported UI languages", () => {
+    // 从实际组件提取翻译键，防止后续新增文案时只补中文而遗漏其他语言。
+    const sourceFiles = [
+      "SubtitleSegmentationPlayground.js",
+      "Playground.js",
+    ].map((fileName) =>
+      fs.readFileSync(path.join(__dirname, fileName), "utf8")
+    );
+    const keyPattern =
+      /["'](subtitle_playground_[a-z0-9_]+|playground_text_translation|subtitle_segmentation)["']/g;
+    const keys = new Set(["cancel"]);
+    for (const sourceFile of sourceFiles) {
+      for (const match of sourceFile.matchAll(keyPattern)) keys.add(match[1]);
+    }
+
+    for (const key of keys) {
+      for (const [language] of UI_LANGS) {
+        expect(I18N[key]?.[language]).toEqual(expect.any(String));
+        expect(I18N[key][language]).not.toBe("");
+      }
+    }
+  });
+
+  test("opens the JSON picker from the keyboard and names the result format", async () => {
+    const { container, root } = renderPlayground();
+    await flushEffects();
+    const input = container.querySelector('input[type="file"]');
+    const clickInput = jest.spyOn(input, "click").mockImplementation(() => {});
+    const uploadButton = input.closest('[role="button"]');
+
+    for (const key of ["Enter", " "]) {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => uploadButton.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(clickInput).toHaveBeenCalledTimes(2);
+    expect(
+      container
+        .querySelector(".MuiToggleButtonGroup-root")
+        .getAttribute("aria-label")
+    ).toBe("Result format");
+
+    act(() => root.unmount());
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  test("uploads a sample, runs rule segmentation, switches VTT and downloads it", async () => {
+    const { container, root } = renderPlayground();
+    await flushEffects();
+
+    // 内容门控（空内容 → 不在场）：上传样本前源/结果框均为空。
+    expect(
+      container.querySelector('.MuiInputBase-root [role="slider"]')
+    ).toBeNull();
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/subtitle-samples/index.json"),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+
+    const input = container.querySelector('input[type="file"]');
+    const file = new File([source], "sample.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(file, "text", { value: async () => source });
+    Object.defineProperty(input, "files", { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    let runButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("运行测试")
+    );
+    expect(runButton.disabled).toBe(false);
+    expect(container.textContent).not.toContain("不支持 AutoDetect");
+    await act(async () => {
+      runButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("不支持 AutoDetect");
+    await selectSourceLanguage(container, "en");
+    runButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("运行测试")
+    );
+    expect(runButton.disabled).toBe(false);
+    expect(container.textContent).not.toContain("不支持 AutoDetect");
+    await act(async () => {
+      runButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("断句统计信息");
+    expect(container.textContent).toContain("已过滤非语音片段");
+    expect(container.textContent).toContain("100%");
+
+    const vttButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "VTT"
+    );
+    const sourceArea = container.querySelector(
+      'textarea[aria-label="原始字幕 JSON"]'
+    );
+    const resultArea = container.querySelector(
+      'textarea[aria-label="断句结果"]'
+    );
+    expect(sourceArea.getAttribute("rows")).toBe("5");
+    expect(resultArea.getAttribute("rows")).toBe("5");
+    expect(sourceArea.classList).toContain("kt-resizable-textarea");
+    expect(resultArea.classList).toContain("kt-resizable-textarea");
+    expect(sourceArea.closest(".kt-resizable-text-field")).not.toBeNull();
+    expect(resultArea.closest(".kt-resizable-text-field")).not.toBeNull();
+    expect(
+      getComputedStyle(sourceArea.closest(".MuiInputBase-root")).overflow
+    ).toBe("visible");
+    expect(getComputedStyle(sourceArea).resize).toBe("none");
+    expect(
+      getComputedStyle(resultArea.closest(".MuiInputBase-root")).overflow
+    ).toBe("visible");
+    expect(getComputedStyle(resultArea).resize).toBe("none");
+    // 内容门控（有内容 → 在场）：上传样本并运行后源/结果框均有内容。
+    const sourceGrip = sourceArea
+      .closest(".MuiInputBase-root")
+      .querySelector('[role="slider"]');
+    expect(sourceGrip).not.toBeNull();
+    expect(
+      resultArea.closest(".MuiInputBase-root").querySelector('[role="slider"]')
+    ).not.toBeNull();
+    act(() => {
+      sourceGrip.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })
+      );
+    });
+    const sourceLockedRoot = sourceArea.closest(".MuiInputBase-root");
+    expect(sourceLockedRoot.classList).toContain("kt-height-locked");
+    expect(sourceLockedRoot.style.height).toBe("64px");
+    expect(container.textContent.indexOf("当前生效的断句配置")).toBeLessThan(
+      container.textContent.indexOf("内置字幕样本")
+    );
+    // 切换和下载控件应与结果文本框处于同一浮动容器内。
+    expect(
+      resultArea
+        .closest(".MuiFormControl-root")
+        .parentElement.contains(vttButton)
+    ).toBe(true);
+    await act(async () => {
+      vttButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(
+      [...container.querySelectorAll("textarea")].some((area) =>
+        area.value.includes("WEBVTT")
+      )
+    ).toBe(true);
+
+    const downloadButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "下载"
+    );
+    act(() => {
+      downloadButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(downloadBlobFile).toHaveBeenCalledWith(
+      expect.stringContaining("WEBVTT"),
+      expect.stringMatching(/^sample-rule-.*\.vtt$/)
+    );
+
+    act(() => root.unmount());
+  });
+
+  test("clearing the result on source language change releases the locked height", async () => {
+    __resetSessionHeightMapForTests();
+    const { container, root } = renderPlayground();
+    await flushEffects();
+
+    const input = container.querySelector('input[type="file"]');
+    const file = new File([source], "sample.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(file, "text", { value: async () => source });
+    Object.defineProperty(input, "files", { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await selectSourceLanguage(container, "en");
+    const runButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("运行测试")
+    );
+    await act(async () => {
+      runButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sourceRoot = container
+      .querySelector('textarea[aria-label="原始字幕 JSON"]')
+      .closest(".MuiInputBase-root");
+    const resultRoot = container
+      .querySelector('textarea[aria-label="断句结果"]')
+      .closest(".MuiInputBase-root");
+    for (const gripRoot of [sourceRoot, resultRoot]) {
+      const grip = gripRoot.querySelector('[role="slider"]');
+      expect(grip).not.toBeNull();
+      act(() => {
+        grip.dispatchEvent(
+          new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })
+        );
+      });
+      expect(gripRoot.classList).toContain("kt-height-locked");
+    }
+
+    // 切换源语言 → 旧结果清空（setResult(null)）→ 结果框彻底解锁；
+    // 源框内容未变，其锁定不受影响（对照断言）。
+    await selectSourceLanguage(container, "zh-CN");
+    expect(resultRoot.querySelector('[role="slider"]')).toBeNull();
+    expect(resultRoot.classList).not.toContain("kt-height-locked");
+    expect(resultRoot.style.height).toBe("");
+    expect(sourceRoot.classList).toContain("kt-height-locked");
+
+    act(() => root.unmount());
+  });
+
+  test.each(["rule", "ai"])(
+    "%s preserves Korean ASR spaces after changing the source language",
+    async (mode) => {
+      const text = "오늘 날씨 정말 좋다";
+      const koreanSource = JSON.stringify({
+        events: [
+          {
+            tStartMs: 1000,
+            dDurationMs: 3000,
+            segs: [{ utf8: text, acAsrConf: 0 }],
+          },
+        ],
+      });
+      handleSubtitle.mockImplementation(async ({ events }) => [
+        {
+          start: events[0].start,
+          end: events[events.length - 1].end,
+          text: events.map((event) => event.text).join(" "),
+          translation: "天气真好",
+          _si: 0,
+          _ei: events.length - 1,
+        },
+      ]);
+      const { container, root } = renderPlayground({
+        subtitleSetting: {
+          segSlug: mode === "ai" ? "test-ai" : "-",
+          useAlgorithmBreaker: "rule",
+          chunkLength: 2000,
+          longSentenceThreshold: 120,
+          toLang: "zh-CN",
+        },
+        transApis: [{ apiSlug: "test-ai", apiType: "openai" }],
+      });
+      await flushEffects();
+      const input = container.querySelector('input[type="file"]');
+      const file = new File([koreanSource], "korean.json", {
+        type: "application/json",
+      });
+      Object.defineProperty(file, "text", { value: async () => koreanSource });
+      Object.defineProperty(input, "files", { value: [file] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      for (const language of ["ko", "en", "ko"]) {
+        await selectSourceLanguage(container, language);
+        const runButton = [...container.querySelectorAll("button")].find(
+          (button) => button.textContent.includes("运行测试")
+        );
+        await act(async () => {
+          runButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(
+          container.querySelector('textarea[aria-label="断句结果"]').value
+        ).toContain(text);
+        if (mode === "ai") {
+          const { events, from } = handleSubtitle.mock.calls.slice(-1)[0][0];
+          expect(from).toBe(language);
+          expect(events).toHaveLength(language === "ko" ? 1 : 4);
+          if (language === "ko") {
+            expect(events[0]).toMatchObject({ text, start: 1000, end: 4000 });
+          }
+        }
+      }
+      act(() => root.unmount());
+    }
+  );
+
+  test("uses useConfirm and previews completed AI cues while streaming", async () => {
+    let resolveResponse;
+    const streamedCue = {
+      start: 0,
+      end: 1000,
+      text: "Hello world.",
+      translation: "你好，世界。",
+      _si: 0,
+      _ei: 0,
+    };
+    handleSubtitle.mockImplementation(({ onSubtitleChunk }) => {
+      onSubtitleChunk({ subtitles: [streamedCue], isFinal: false });
+      return new Promise((resolve) => {
+        resolveResponse = resolve;
+      });
+    });
+    const { container, root } = renderPlayground({
+      subtitleSetting: {
+        segSlug: "test-ai",
+        chunkLength: 2000,
+        longSentenceThreshold: 120,
+        toLang: "zh-CN",
+      },
+      transApis: [
+        {
+          apiSlug: "test-ai",
+          apiName: "测试 AI",
+          apiType: "openai",
+          model: "test-model",
+          useStream: true,
+        },
+      ],
+    });
+    await flushEffects();
+    expect(container.textContent).toContain("boundary-v3");
+    expect(container.textContent).toContain(
+      "当前 AI Chunk 长度高于推荐默认值 1000"
+    );
+
+    const input = container.querySelector('input[type="file"]');
+    const file = new File([source], "stream.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(file, "text", { value: async () => source });
+    Object.defineProperty(input, "files", { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const runButton = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("运行测试")
+    );
+    // AI 模式允许本地字幕保留 AutoDetect，不应阻止发起测试。
+    expect(runButton.disabled).toBe(false);
+    await act(async () => {
+      runButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "发送 AI 断句请求",
+        confirmText: "继续",
+      })
+    );
+    expect(
+      runButton.querySelector(".MuiCircularProgress-root").style.width
+    ).toBe("20px");
+    expect(
+      container.querySelector('textarea[aria-label="断句结果"]').value
+    ).toContain("Hello world.");
+    expect(container.textContent).not.toContain("断句统计信息");
+    expect(
+      container
+        .querySelector('[data-testid="segmentation-actions"]')
+        .contains(
+          container.querySelector('[data-testid="segmentation-progress"]')
+        )
+    ).toBe(true);
+
+    await act(async () => {
+      resolveResponse([streamedCue]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("断句统计信息");
+    expect(container.textContent).not.toContain("当前结果已过期");
+
+    act(() => root.unmount());
+  });
+});
+
+describe("SubtitleSegmentationPlayground textarea grip style", () => {
+  const source = JSON.stringify({
+    lang: "en",
+    events: [{ tStartMs: 0, dDurationMs: 1000, segs: [{ utf8: "Hello." }] }],
+  });
+
+  function renderGripPlayground(key) {
+    const cache = createCache({ key, speedy: false });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <CacheProvider value={cache}>
+          <SubtitleSegmentationPlayground
+            subtitleSetting={{
+              segSlug: "-",
+              useAlgorithmBreaker: "rule",
+              longSentenceThreshold: 120,
+              toLang: "zh-CN",
+            }}
+            transApis={[]}
+            prompts={[]}
+          />
+        </CacheProvider>
+      );
+    });
+    const emotionCss = () =>
+      [...document.head.querySelectorAll(`style[data-emotion^="${key}"]`)]
+        .map((style) => style.textContent)
+        .join("\n");
+    return { container, root, cache, emotionCss };
+  }
+
+  async function uploadSource(container) {
+    const input = container.querySelector('input[type="file"]');
+    const file = new File([source], "sample.json", {
+      type: "application/json",
+    });
+    Object.defineProperty(file, "text", { value: async () => source });
+    Object.defineProperty(input, "files", { value: [file] });
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: 1, samples: [] }),
+    });
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+    mockUseTextareaGripStyle.mockReset();
+    mockUseTextareaGripStyle.mockReturnValue("concentric-smooth");
+  });
+
+  test("keeps the resize none !important branch and renders the grip", async () => {
+    mockUseTextareaGripStyle.mockReturnValue("concentric-smooth");
+    const { container, root, cache, emotionCss } = renderGripPlayground(
+      "subtitle-grip-default"
+    );
+    await flushEffects();
+    await uploadSource(container);
+
+    const sourceArea = container.querySelector(
+      'textarea[aria-label="原始字幕 JSON"]'
+    );
+    const grip = sourceArea
+      .closest(".MuiInputBase-root")
+      .querySelector('[role="slider"]');
+    expect(grip).not.toBeNull();
+    // 非原生分支：RESIZABLE_TEXT_FIELD_SX 仍压制 resize。
+    expect(emotionCss()).toContain("resize:none!important");
+    await act(async () => root.unmount());
+    cache.sheet.flush();
+  });
+
+  // B1：hidden = 不渲染手柄 + textarea 原生 resize 回退。sx 的 !important
+  // 压制必须随 gripStyle 三元翻转（红：现实现 resize none!important 压死
+  // 原生回退且渲染空图形手柄——不可见却可拖是隐蔽交互面）。
+  test("hidden variant renders no grip and restores native resize", async () => {
+    mockUseTextareaGripStyle.mockReturnValue("hidden");
+    const { container, root, cache, emotionCss } = renderGripPlayground(
+      "subtitle-grip-hidden"
+    );
+    await flushEffects();
+    await uploadSource(container);
+
+    const sourceArea = container.querySelector(
+      'textarea[aria-label="原始字幕 JSON"]'
+    );
+    expect(sourceArea.style.resize).toBe("vertical");
+    expect(
+      sourceArea.closest(".MuiInputBase-root").querySelector('[role="slider"]')
+    ).toBeNull();
+    await act(async () => root.unmount());
+    cache.sheet.flush();
+  });
+
+  // 意见 A：grip 样式切到 hidden 时自动释放会话高度锁——锁定类与内联
+  // 高度一并撤销，字段不被 kt-height-locked 永久钉死（红：现实现残留锁类）。
+  test("switching to hidden releases the session height lock", async () => {
+    mockUseTextareaGripStyle.mockReturnValue("concentric-smooth");
+    __resetSessionHeightMapForTests();
+    const cache = createCache({ key: "subtitle-grip-release", speedy: false });
+    // 每次渲染新建元素：复用同一元素对象会被 React 判等跳过提交，
+    // gripStyle 切换不会生效。
+    const makeElement = () => (
+      <CacheProvider value={cache}>
+        <SubtitleSegmentationPlayground
+          subtitleSetting={{
+            segSlug: "-",
+            useAlgorithmBreaker: "rule",
+            longSentenceThreshold: 120,
+            toLang: "zh-CN",
+          }}
+          transApis={[]}
+          prompts={[]}
+        />
+      </CacheProvider>
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(makeElement()));
+    await flushEffects();
+    await uploadSource(container);
+
+    const sourceArea = container.querySelector(
+      'textarea[aria-label="原始字幕 JSON"]'
+    );
+    const fieldRoot = sourceArea.closest(".MuiInputBase-root");
+    // 真实交互路径造锁：手柄键盘调高（与既有造锁口径一致）。
+    const grip = fieldRoot.querySelector('[role="slider"]');
+    expect(grip).not.toBeNull();
+    await act(async () => {
+      grip.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })
+      );
+    });
+    expect(fieldRoot.classList).toContain("kt-height-locked");
+
+    mockUseTextareaGripStyle.mockReturnValue("hidden");
+    await act(async () => root.render(makeElement()));
+    expect(fieldRoot.classList).not.toContain("kt-height-locked");
+    expect(fieldRoot.style.height).toBe("");
+
+    await act(async () => root.unmount());
+    cache.sheet.flush();
+    __resetSessionHeightMapForTests();
+  });
+});

@@ -1,0 +1,255 @@
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import DraggableResizable from "./DraggableResizable";
+import {
+  PANEL_BITMAP_CURSORS,
+  PANEL_KEYWORD_CURSORS,
+} from "../../styles/cursors";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+jest.mock("../../libs/mobile", () => ({ isMobile: false }));
+
+const emptyRect = {
+  x: 0,
+  y: 0,
+  top: 0,
+  right: 0,
+  bottom: 0,
+  left: 0,
+  width: 0,
+  height: 0,
+  toJSON: () => ({}),
+};
+
+describe("DraggableResizable auto height bounds", () => {
+  let container;
+  let root;
+  let layoutOuterHeight;
+  let transformedOuterHeight;
+  let resizeCallback;
+  let getBoundingClientRect;
+  let getOffsetHeight;
+  let originalResizeObserver;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    layoutOuterHeight = 100;
+    transformedOuterHeight = 97;
+    originalResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = class {
+      constructor(callback) {
+        resizeCallback = callback;
+      }
+
+      observe() {}
+
+      disconnect() {}
+    };
+    HTMLElement.prototype.setPointerCapture = jest.fn();
+    getBoundingClientRect = jest
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function () {
+        if (this.classList?.contains("KT-draggable")) {
+          return {
+            ...emptyRect,
+            height: transformedOuterHeight,
+            bottom: transformedOuterHeight,
+          };
+        }
+        return emptyRect;
+      });
+    getOffsetHeight = jest
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function () {
+        return this.classList?.contains("KT-draggable") ? layoutOuterHeight : 0;
+      });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: 500,
+    });
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    getBoundingClientRect.mockRestore();
+    getOffsetHeight.mockRestore();
+    window.ResizeObserver = originalResizeObserver;
+  });
+
+  function renderPanel(props = {}) {
+    const defaults = {
+      position: { x: 0, y: 0 },
+      size: { w: 320, h: 400 },
+      minSize: { w: 100, h: 100 },
+      maxSize: { w: 800, h: 800 },
+      setSize: jest.fn(),
+      setPosition: jest.fn(),
+      autoHeight: true,
+      header: <span>header</span>,
+      children: <div>content</div>,
+    };
+
+    const panel = { ...defaults, ...props };
+    act(() => root.render(<DraggableResizable {...panel} />));
+    return panel;
+  }
+
+  test("allows a short auto-height panel to reach the viewport bottom", () => {
+    const panel = renderPanel();
+    panel.setPosition.mockClear();
+    const header = container.querySelector(".KT-draggable-header");
+
+    act(() => {
+      header.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 })
+      );
+    });
+    act(() => {
+      header.dispatchEvent(
+        new MouseEvent("pointermove", {
+          bubbles: true,
+          clientX: 0,
+          clientY: 1000,
+        })
+      );
+    });
+
+    expect(panel.setPosition).toHaveBeenLastCalledWith({ x: 0, y: 400 });
+  });
+
+  test("clamps with layout height while the entrance transform scales visual bounds", () => {
+    const panel = renderPanel({ position: { x: 0, y: 400 } });
+    panel.setPosition.mockClear();
+    transformedOuterHeight = 291;
+    layoutOuterHeight = 300;
+
+    act(() => resizeCallback());
+
+    const updater = panel.setPosition.mock.calls.at(-1)[0];
+    expect(updater({ x: 0, y: 400 })).toEqual({ x: 0, y: 200 });
+  });
+
+  test("keeps an auto-height panel above the horizontal scrollbar", () => {
+    const getClientHeight = jest
+      .spyOn(document.documentElement, "clientHeight", "get")
+      .mockReturnValue(485);
+
+    try {
+      const panel = renderPanel({ position: { x: 0, y: 400 } });
+      const updater = panel.setPosition.mock.calls.at(-1)[0];
+      expect(updater({ x: 0, y: 400 })).toEqual({ x: 0, y: 385 });
+    } finally {
+      getClientHeight.mockRestore();
+    }
+  });
+
+  // The header contains buttons and an overflow menu as well as the drag area.
+  // Opening the menu must not make the panel follow the pointer.
+  test("pressing a control inside the header does not start a drag", () => {
+    const panel = renderPanel({
+      header: (
+        <span>
+          <button type="button">more</button>
+        </span>
+      ),
+    });
+    panel.setPosition.mockClear();
+    const header = container.querySelector(".KT-draggable-header");
+    const button = header.querySelector("button");
+
+    act(() => {
+      button.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 })
+      );
+    });
+    act(() => {
+      header.dispatchEvent(
+        new MouseEvent("pointermove", {
+          bubbles: true,
+          clientX: 0,
+          clientY: 200,
+        })
+      );
+    });
+
+    expect(panel.setPosition).not.toHaveBeenCalled();
+  });
+
+  // Browsers do not emit pointerup after pointercancel, so cancellation must
+  // clear origin too. Otherwise, an interrupted drag leaves a stale origin and
+  // moving over the header resumes dragging without any button pressed.
+  test("a cancelled pointer ends the drag instead of leaving it stuck", () => {
+    const panel = renderPanel();
+    const header = container.querySelector(".KT-draggable-header");
+
+    act(() => {
+      header.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 })
+      );
+    });
+    act(() => {
+      header.dispatchEvent(new MouseEvent("pointercancel", { bubbles: true }));
+    });
+
+    panel.setPosition.mockClear();
+    act(() => {
+      header.dispatchEvent(
+        new MouseEvent("pointermove", {
+          bubbles: true,
+          clientX: 0,
+          clientY: 200,
+        })
+      );
+    });
+
+    expect(panel.setPosition).not.toHaveBeenCalled();
+  });
+
+  // 真红主路径：Windows+Chromium 判定命中（UA-CH mock）下面板 8 向 resize
+  // 手柄与标题栏拖动区必须使用共享自绘位图光标——Windows Chromium 在硬件
+  // 覆盖层合成路径下会把单色系统光标渲染成白色，位图光标使显示颜色确定
+  // 化；关键字仅作位图加载失败回退。当前实现为裸关键字，本用例首跑必红。
+  test("panel handles use shared bitmap cursors on Windows Chromium", () => {
+    Object.defineProperty(window.navigator, "userAgentData", {
+      configurable: true,
+      value: { platform: "Windows" },
+    });
+    try {
+      renderPanel();
+      const panel = container.querySelector(".KT-draggable");
+      const directions = ["nw", "n", "ne", "w", null, "e", "sw", "s", "se"];
+      [...panel.children].forEach((child, i) => {
+        // 第 5 格是 TranslationPanelSurface 面板本体，不携带手柄光标。
+        if (directions[i] === null) return;
+        expect(child.style.cursor).toBe(PANEL_BITMAP_CURSORS[directions[i]]);
+      });
+      const header = container.querySelector(".KT-draggable-header");
+      expect(header.style.cursor).toBe(PANEL_BITMAP_CURSORS.move);
+    } finally {
+      delete window.navigator.userAgentData;
+    }
+  });
+
+  // 非 Windows 默认环境（jsdom 现状）不变式：手柄光标不含位图 data-URI、
+  // 仍为纯关键字光标（改动前后都应通过）。注意：改后回退关键字体系为
+  // ns-resize/ew-resize 等方向键回退（与改动前的 row-resize/col-resize 为
+  // 同义关键字、浏览器渲染同一系统光标，视觉零变化但字符串不同），故此
+  // 处不逐字比对字符串，改为比对关键字表值（实现后生效）。
+  test("panel handles keep the plain keyword cursor outside Windows Chromium", () => {
+    renderPanel();
+    const panel = container.querySelector(".KT-draggable");
+    const directions = ["nw", "n", "ne", "w", null, "e", "sw", "s", "se"];
+    [...panel.children].forEach((child, i) => {
+      expect(child.style.cursor).not.toContain("data:image");
+      if (directions[i] === null) return;
+      expect(child.style.cursor).toBe(PANEL_KEYWORD_CURSORS[directions[i]]);
+    });
+    const header = container.querySelector(".KT-draggable-header");
+    expect(header.style.cursor).toBe("move");
+  });
+});

@@ -1,0 +1,955 @@
+import fs from "fs";
+import path from "path";
+import { act } from "react";
+import { Simulate } from "react-dom/test-utils";
+import { createRoot } from "react-dom/client";
+import SubtitleSetting, { parseCssToObject, objectToCss } from "./Subtitle";
+import { useSubtitle } from "../../hooks/Subtitle";
+import { I18N, UI_LANGS, DEFAULT_SUBTITLE_SETTING } from "../../config";
+import { AsrCacheClient } from "../../subtitle/asr/cacheBridge";
+import { captionCacheRequest } from "../../subtitle/captionCache";
+jest.mock("../../subtitle/captionCache", () => ({
+  captionCacheRequest: jest.fn(),
+}));
+beforeEach(() => captionCacheRequest.mockResolvedValue({ count: 0, bytes: 0 }));
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+jest.mock("../../hooks/I18n", () => ({
+  useI18n: () => (key) => key,
+}));
+
+jest.mock("../../hooks/Subtitle", () => ({
+  useSubtitle: jest.fn(),
+}));
+
+let mockServiceApis = [];
+jest.mock("../../hooks/Api", () => ({
+  useApiList: () => {
+    const { supportsApiCapability, isApiConfigured } = jest.requireActual(
+      "../../config/serviceSelection"
+    );
+    return {
+      transApis: mockServiceApis,
+      enabledApis: mockServiceApis.filter(
+        (api) =>
+          !api.isDisabled &&
+          isApiConfigured(api) &&
+          supportsApiCapability(api, "translate")
+      ),
+      aiEnabledApis: [],
+    };
+  },
+}));
+jest.mock("../../subtitle/asr/cacheBridge", () => ({
+  AsrCacheClient: jest.fn(() => ({
+    getStats: jest.fn(async () => ({
+      subtitles: { bytes: 0, count: 0 },
+      audio: { bytes: 0, count: 0 },
+    })),
+    clearSubtitles: jest.fn(async () => {}),
+    clearAudio: jest.fn(async () => {}),
+    close: jest.fn(),
+  })),
+}));
+
+jest.mock("../../hooks/Prompt", () => ({
+  usePromptList: () => ({ prompts: [] }),
+}));
+
+function renderSubtitle(overrides = {}) {
+  const updateSubtitle = jest.fn();
+  useSubtitle.mockReturnValue({
+    subtitleSetting: {
+      ...DEFAULT_SUBTITLE_SETTING,
+      // showLoadNotification 不在 DEFAULT_SUBTITLE_SETTING 里，
+      // 它的默认值只存在于 Subtitle.js 的解构默认值中。
+      enhanceMode: "desktop",
+      ...overrides,
+    },
+    updateSubtitle,
+  });
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  act(() => {
+    root.render(<SubtitleSetting />);
+  });
+
+  return {
+    container,
+    updateSubtitle,
+    unmount: () => {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+function setSliderValue(input, value) {
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value"
+    ).set.call(input, String(value));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+describe("YouTube ASR settings", () => {
+  const previousClient = process.env.REACT_APP_CLIENT;
+  afterEach(() => {
+    if (previousClient === undefined) delete process.env.REACT_APP_CLIENT;
+    else process.env.REACT_APP_CLIENT = previousClient;
+    mockServiceApis = [];
+  });
+  test.each(["resolve", "reject"])(
+    "unmount closes a pending cache stats client before it can %s",
+    async (outcome) => {
+      process.env.REACT_APP_CLIENT = "chrome";
+      let resolveStats, rejectStats;
+      const close = jest.fn();
+      AsrCacheClient.mockImplementationOnce(() => ({
+        getStats: () =>
+          new Promise((resolve, reject) => {
+            resolveStats = resolve;
+            rejectStats = reject;
+          }),
+        close,
+      }));
+      const view = renderSubtitle();
+      expect(close).not.toHaveBeenCalled();
+      view.unmount();
+      expect(close).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        if (outcome === "resolve")
+          resolveStats({
+            subtitles: { bytes: 1, count: 1 },
+            audio: { bytes: 1, count: 1 },
+          });
+        else rejectStats(new Error("CACHE_CLOSED"));
+      });
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(view.container.childElementCount).toBe(0);
+    }
+  );
+
+  test("accepts text-only services, saves the selected service, and restores its saved value", () => {
+    process.env.REACT_APP_CLIENT = "chrome";
+    const service = (slug, timestamps) => ({
+      apiSlug: slug,
+      apiName: slug,
+      apiType: "CustomASR",
+      provider: {
+        apiVersion: "1",
+        implementation: { kind: "native" },
+        capabilities: { transcribe: { outputModes: ["complete"], timestamps } },
+      },
+    });
+    mockServiceApis = [service("timed-asr", true), service("text-only", false)];
+    const view = renderSubtitle();
+    const select = view.container.querySelector(
+      '[aria-label="youtube_asr_service"][role="combobox"]'
+    );
+    act(() => Simulate.mouseDown(select, { button: 0 }));
+    expect(
+      [...document.querySelectorAll('[role="option"]')].some(
+        (item) => item.textContent === "text-only"
+      )
+    ).toBe(true);
+    act(() =>
+      [...document.querySelectorAll('[role="option"]')]
+        .find((item) => item.textContent === "text-only")
+        .click()
+    );
+    expect(view.updateSubtitle).toHaveBeenCalledWith({
+      asrApiSlug: "text-only",
+    });
+    view.unmount();
+    const saved = renderSubtitle({ asrApiSlug: "text-only" });
+    expect(
+      saved.container.querySelector(
+        '[aria-label="youtube_asr_service"][role="combobox"]'
+      ).textContent
+    ).toBe("text-only");
+    saved.unmount();
+  });
+  test.each(["local", "external"])(
+    "pure %s ASR can be selected from the complete service list",
+    (kind) => {
+      process.env.REACT_APP_CLIENT = "edge";
+      const service =
+        kind === "local"
+          ? {
+              apiSlug: "local-asr",
+              apiName: "Local ASR",
+              apiType: "LocalAI",
+              modelRef: "sensevoice-small",
+              device: "webgpu",
+              enabledCapabilities: ["transcribe"],
+            }
+          : {
+              apiSlug: "external-asr",
+              apiName: "External ASR",
+              apiType: "Plugin",
+              enabledCapabilities: ["transcribe"],
+              provider: {
+                apiVersion: "1",
+                implementation: { kind: "script" },
+                capabilities: {
+                  transcribe: {
+                    handler: "transcribe",
+                    outputModes: ["complete"],
+                  },
+                },
+              },
+            };
+      mockServiceApis = [service];
+      const view = renderSubtitle();
+      act(() =>
+        Simulate.mouseDown(
+          view.container.querySelector(
+            '[aria-label="youtube_asr_service"][role="combobox"]'
+          ),
+          { button: 0 }
+        )
+      );
+      const option = [...document.querySelectorAll('[role="option"]')].find(
+        (item) => item.textContent === service.apiName
+      );
+      expect(option).toBeDefined();
+      act(() => option.click());
+      expect(view.updateSubtitle).toHaveBeenCalledWith({
+        asrApiSlug: service.apiSlug,
+      });
+      view.unmount();
+      const saved = renderSubtitle({ asrApiSlug: service.apiSlug });
+      expect(
+        saved.container.querySelector(
+          '[aria-label="youtube_asr_service"][role="combobox"]'
+        ).textContent
+      ).toBe(service.apiName);
+      saved.unmount();
+    }
+  );
+
+  test.each(["disabled", "capability-off", "invalid-config"])(
+    "unavailable ASR remains visible only as a disabled saved selection: %s",
+    (reason) => {
+      process.env.REACT_APP_CLIENT = "chrome";
+      mockServiceApis = [
+        {
+          apiSlug: "unavailable-asr",
+          apiName: "Unavailable ASR",
+          apiType: "Plugin",
+          isDisabled: reason === "disabled",
+          enabledCapabilities:
+            reason === "capability-off" ? [] : ["transcribe"],
+          provider: {
+            apiVersion: "1",
+            implementation: { kind: "script" },
+            capabilities: {
+              transcribe: { handler: "transcribe", outputModes: ["complete"] },
+            },
+            settings:
+              reason === "invalid-config"
+                ? [{ key: "key", type: "password", required: true }]
+                : [],
+          },
+        },
+      ];
+      const view = renderSubtitle({ asrApiSlug: "unavailable-asr" });
+      act(() =>
+        Simulate.mouseDown(
+          view.container.querySelector(
+            '[aria-label="youtube_asr_service"][role="combobox"]'
+          ),
+          { button: 0 }
+        )
+      );
+      const options = [...document.querySelectorAll('[role="option"]')];
+      expect(options).toHaveLength(2);
+      expect(options[1].getAttribute("aria-disabled")).toBe("true");
+      expect(options[1].textContent).toContain("youtube_asr_unavailable");
+      view.unmount();
+    }
+  );
+
+  test("quality settings put both ASR rows after segmentation and before ad skipping", () => {
+    const view = renderSubtitle();
+    const labels = [
+      ...view.container.querySelectorAll(".kt-settings-row__copy strong"),
+    ].map((element) => element.textContent);
+    const start = labels.indexOf("translate_service");
+    expect(labels.slice(start, start + 10)).toEqual([
+      "translate_service",
+      "translation_prompt",
+      "ai_segmentation",
+      "youtube_caption_cache_limit",
+      "youtube_caption_cache_clear",
+      "youtube_asr_service",
+      "youtube_asr_audio_cache_limit",
+      "youtube_asr_clear",
+      "youtube_asr_clear_audio",
+      "is_skip_ad",
+    ]);
+    view.unmount();
+  });
+  test("clearing captions disables the action until the background acknowledges it", async () => {
+    process.env.REACT_APP_CLIENT = "chrome";
+    let complete;
+    const close = jest.fn();
+    AsrCacheClient.mockImplementation(() => ({
+      getStats: jest.fn(async () => ({
+        subtitles: { bytes: 1024, count: 1 },
+        audio: { bytes: 2048, count: 1 },
+      })),
+      clearSubtitles: () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+      clearAudio: jest.fn(async () => {}),
+      close,
+    }));
+    const view = renderSubtitle(),
+      button = [...view.container.querySelectorAll("button")].find(
+        (item) =>
+          item.textContent.includes("youtube_asr_clear") &&
+          !item.textContent.includes("youtube_asr_clear_audio")
+      );
+    act(() => button.click());
+    expect(button.disabled).toBe(true);
+    await act(async () => {
+      complete();
+      await Promise.resolve();
+    });
+    expect(button.textContent).toContain("youtube_asr_cleared");
+    expect(close).toHaveBeenCalled();
+    view.unmount();
+  });
+  test("clearing audio cache disables the action and updates label", async () => {
+    process.env.REACT_APP_CLIENT = "chrome";
+    let complete;
+    const close = jest.fn();
+    AsrCacheClient.mockImplementation(() => ({
+      getStats: jest.fn(async () => ({
+        subtitles: { bytes: 1024, count: 1 },
+        audio: { bytes: 2048, count: 1 },
+      })),
+      clearAudio: () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+      clearSubtitles: jest.fn(async () => {}),
+      close,
+    }));
+    const view = renderSubtitle(),
+      button = [...view.container.querySelectorAll("button")].find((item) =>
+        item.textContent.includes("youtube_asr_clear_audio")
+      );
+    expect(button).toBeDefined();
+    act(() => button.click());
+    expect(button.disabled).toBe(true);
+    await act(async () => {
+      complete();
+      await Promise.resolve();
+    });
+    expect(button.textContent).toContain("youtube_asr_audio_cleared");
+    expect(close).toHaveBeenCalled();
+    view.unmount();
+  });
+  test("audioCacheLimit input allows values between 0 and 1000", () => {
+    process.env.REACT_APP_CLIENT = "chrome";
+    const view = renderSubtitle();
+    const input = view.container.querySelector('input[name="audioCacheLimit"]');
+    expect(input).toBeDefined();
+    expect(input.getAttribute("min")).toBe("0");
+    expect(input.getAttribute("max")).toBe("1000");
+    view.unmount();
+  });
+  test.each([0, 1000])(
+    "caption cache count accepts and saves %s videos",
+    (value) => {
+      process.env.REACT_APP_CLIENT = "chrome";
+      const view = renderSubtitle();
+      const input = view.container.querySelector(
+        'input[name="captionCacheLimit"]'
+      );
+      expect(input.value).toBe("100");
+      expect(input.min).toBe("0");
+      expect(input.max).toBe("1000");
+      act(() => Simulate.change(input, { target: { value: String(value) } }));
+      act(() => Simulate.blur(input));
+      expect(view.updateSubtitle).toHaveBeenCalledWith({
+        captionCacheLimit: value,
+      });
+      view.unmount();
+    }
+  );
+  test("clear subtitle cache waits for confirmation and ignores stale size results", async () => {
+    process.env.REACT_APP_CLIENT = "chrome";
+    let finishStats, finishClear;
+    captionCacheRequest.mockImplementation(
+      (action) =>
+        new Promise((resolve) => {
+          if (action === "stats") finishStats = resolve;
+          if (action === "clear") finishClear = resolve;
+        })
+    );
+    const view = renderSubtitle();
+    const button = [...view.container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("youtube_caption_cache_clear")
+    );
+    act(() => button.click());
+    expect(button.disabled).toBe(true);
+    await act(async () => {
+      finishClear(true);
+      await Promise.resolve();
+    });
+    expect(button.textContent).toContain("youtube_asr_cleared");
+    await act(async () => {
+      finishStats({ count: 10, bytes: 9999 });
+      await Promise.resolve();
+    });
+    expect(button.textContent).toContain("(0 ·");
+    expect(captionCacheRequest).toHaveBeenCalledWith("clear");
+    view.unmount();
+  });
+  test("failed subtitle cache clearing preserves the displayed size and allows retry", async () => {
+    process.env.REACT_APP_CLIENT = "chrome";
+    captionCacheRequest.mockImplementation(async (action) => {
+      if (action === "stats") return { count: 3, bytes: 1024 };
+      throw new Error("CACHE_FAILED");
+    });
+    const view = renderSubtitle();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const button = [...view.container.querySelectorAll("button")].find((b) =>
+      b.textContent.includes("youtube_caption_cache_clear")
+    );
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+    });
+    expect(button.textContent).toContain("youtube_caption_cache_clear_failed");
+    expect(button.textContent).toContain("(3 ·");
+    expect(button.disabled).toBe(false);
+    view.unmount();
+  });
+});
+
+describe("Subtitle style editor layout", () => {
+  test("preserves the spaced grid gutters inside its stack", () => {
+    const view = renderSubtitle();
+    const sourceTitle = Array.from(
+      view.container.querySelectorAll(".MuiTypography-subtitle2")
+    ).find((element) => element.textContent === "origin_styles");
+    const grid = sourceTitle.closest(".MuiGrid-item").parentElement;
+    const stack = grid.parentElement;
+
+    expect(window.getComputedStyle(stack).gap).toBe("16px");
+    expect(window.getComputedStyle(grid).marginLeft).toBe("-16px");
+    expect(window.getComputedStyle(grid).marginTop).toBe("-16px");
+
+    view.unmount();
+  });
+
+  test("names every slider and color input without relying on adjacent text", () => {
+    const view = renderSubtitle();
+    const sliderNames = Array.from(
+      view.container.querySelectorAll('.MuiSlider-root input[type="range"]')
+    ).map((input) => input.getAttribute("aria-label"));
+    expect(sliderNames).toEqual([
+      "origin_styles font_size",
+      "translation_styles font_size",
+      "opacity",
+      "line_height",
+      "padding vertical",
+      "padding horizontal",
+    ]);
+
+    const colorInputs = Array.from(
+      view.container.querySelectorAll('input[type="color"]')
+    );
+    expect(
+      colorInputs.map((input) => input.getAttribute("aria-label"))
+    ).toEqual([
+      "origin_styles font_color",
+      "translation_styles font_color",
+      "background_color",
+    ]);
+    expect(
+      colorInputs.every((input) => getComputedStyle(input).width === "48px")
+    ).toBe(true);
+    view.unmount();
+  });
+});
+
+describe("Subtitle style persistence", () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  // 本文件里没有任何 onChangeCommitted，200ms 防抖是样式改动唯一的持久化路径。
+  // 卸载时若直接 clearTimeout 而不 flush，「拖完滑块立刻切走」的改动就没了。
+  test("flushes a pending style write when the page unmounts", () => {
+    jest.useFakeTimers();
+    const view = renderSubtitle();
+    const slider = view.container.querySelector(".MuiSlider-root input");
+    expect(slider).not.toBeNull();
+
+    setSliderValue(slider, 24);
+    act(() => {
+      jest.advanceTimersByTime(199);
+    });
+    expect(view.updateSubtitle).not.toHaveBeenCalled();
+
+    view.unmount();
+
+    expect(view.updateSubtitle).toHaveBeenCalledTimes(1);
+  });
+
+  test("coalesces rapid style edits into a single write", () => {
+    jest.useFakeTimers();
+    const view = renderSubtitle();
+    const slider = view.container.querySelector(".MuiSlider-root input");
+
+    setSliderValue(slider, 20);
+    setSliderValue(slider, 22);
+    setSliderValue(slider, 24);
+
+    act(() => {
+      jest.advanceTimersByTime(199);
+    });
+    expect(view.updateSubtitle).not.toHaveBeenCalled();
+
+    act(() => {
+      jest.advanceTimersByTime(1);
+    });
+    expect(view.updateSubtitle).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+  });
+
+  test("preserves the background color when editing opacity after an unquoted URL", () => {
+    jest.useFakeTimers();
+    const backgroundImage = "url(https://example.invalid/image?accept=image/*)";
+    const view = renderSubtitle({
+      windowStyle: `background-image: ${backgroundImage};\ncolor: red;\nfont-size: 32px;\nbackground-color: rgba(255, 0, 0, 0.8);`,
+    });
+    const opacity = view.container.querySelector('input[aria-label="opacity"]');
+    const color = view.container.querySelector(
+      'input[aria-label="background_color"]'
+    );
+    expect(opacity.value).toBe("0.8");
+    expect(color.value).toBe("#ff0000");
+
+    setSliderValue(opacity, 0.6);
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+
+    expect(view.updateSubtitle).toHaveBeenCalledTimes(1);
+    expect(view.updateSubtitle).toHaveBeenCalledWith({
+      windowStyle: `background-image: ${backgroundImage};\ncolor: red;\nfont-size: 32px;\nbackground-color: rgba(255, 0, 0, 0.6);`,
+    });
+    view.unmount();
+  });
+
+  test.each(["/*/ ( */", '/*/ " */'])(
+    "preserves sibling styles when changing font size after %s",
+    (comment) => {
+      jest.useFakeTimers();
+      const view = renderSubtitle({
+        originStyle: `font-size: 2rem ${comment}; color: red; text-shadow: 1px 1px black;`,
+      });
+      const slider = view.container.querySelector(
+        'input[aria-label="origin_styles font_size"]'
+      );
+
+      setSliderValue(slider, 2.1);
+      act(() => {
+        jest.advanceTimersByTime(200);
+      });
+
+      expect(view.updateSubtitle).toHaveBeenCalledTimes(1);
+      expect(view.updateSubtitle).toHaveBeenCalledWith({
+        originStyle:
+          "font-size: clamp(1.05rem, 2.1cqw, 3.15rem);\ncolor: red;\ntext-shadow: 1px 1px black;",
+      });
+      view.unmount();
+    }
+  );
+
+  test.each([
+    ["an escaped opening parenthesis", "font-family", String.raw`Font\(`],
+    ["an escaped quote", "font-family", String.raw`Font\"`],
+    [
+      "an escaped closing parenthesis in a URL",
+      "background-image",
+      String.raw`url(icon\);variant.svg)`,
+    ],
+  ])(
+    "removes text shadow after %s without changing other styles",
+    (_case, property, value) => {
+      jest.useFakeTimers();
+      const view = renderSubtitle({
+        windowStyle: `${property}: ${value};\ntext-shadow: 1px 1px black;\ncolor: white;`,
+      });
+      const shadowLabel = Array.from(
+        view.container.querySelectorAll("label")
+      ).find((label) => label.textContent === "text_shadow");
+      const shadowInput = shadowLabel.querySelector('input[type="checkbox"]');
+      expect(shadowInput.checked).toBe(true);
+
+      act(() => shadowInput.click());
+      act(() => {
+        jest.advanceTimersByTime(200);
+      });
+
+      expect(shadowInput.checked).toBe(false);
+      expect(view.updateSubtitle).toHaveBeenCalledTimes(1);
+      expect(view.updateSubtitle).toHaveBeenCalledWith({
+        windowStyle: `${property}: ${value};\ncolor: white;`,
+      });
+      view.unmount();
+    }
+  );
+});
+
+describe("Subtitle segmentation warning", () => {
+  // 三向门控：只有在强制重翻译、启用了 AI 断句、且断句服务与翻译服务不同时才警告。
+  // 这条文案的历史值得留意：b436d5b 加入，a07d39f 删除，1b10d45 有意恢复。
+  const warned = (overrides) => {
+    const view = renderSubtitle(overrides);
+    const hit = view.container.textContent.includes("seg_trans_diff_warning");
+    view.unmount();
+    return hit;
+  };
+
+  test("warns only when the segmentation service differs from the translator", () => {
+    expect(
+      warned({
+        forceSubtitleRetranslate: true,
+        segSlug: "openai",
+        apiSlug: "microsoft",
+      })
+    ).toBe(true);
+  });
+
+  test.each([
+    [
+      "retranslation is off",
+      {
+        forceSubtitleRetranslate: false,
+        segSlug: "openai",
+        apiSlug: "microsoft",
+      },
+    ],
+    [
+      "AI segmentation is disabled",
+      { forceSubtitleRetranslate: true, segSlug: "-", apiSlug: "microsoft" },
+    ],
+    [
+      "both services match",
+      { forceSubtitleRetranslate: true, segSlug: "openai", apiSlug: "openai" },
+    ],
+  ])("stays silent when %s", (_case, overrides) => {
+    expect(warned(overrides)).toBe(false);
+  });
+});
+
+describe("Subtitle CSS round-trip", () => {
+  // 拖动任意样式滑块都会把整块 CSS 经 parse -> object -> serialize 重写一遍。
+  // 分号会合法地出现在引号、括号和注释内部，裸 split(";") 会把值拦腰截断，
+  // 而截断结果会被写回存储，无法恢复。这是上游 dev 上就存在的问题，不是本分支引入的。
+  const roundTrip = (css) => objectToCss(parseCssToObject(css));
+  const normalize = (css) => css.trim().replace(/;$/, "");
+
+  test.each([
+    [
+      "the shipped window default",
+      `padding: 0.5em 1em;
+background-color: rgba(0, 0, 0, 0.5);
+color: white;
+line-height: 1.3;
+text-shadow: 1px 1px 2px black;
+display: inline-block`,
+    ],
+    ["the shipped origin default", `font-size: clamp(1rem, 2cqw, 3rem);`],
+    [
+      "a data URI containing semicolons",
+      `background-image: url("data:image/svg+xml;utf8,<svg/>");
+color: white;`,
+    ],
+    [
+      "a comment containing a semicolon",
+      `/* a;b */
+color: red;`,
+    ],
+    [
+      "nested parentheses and quotes",
+      `background: linear-gradient(90deg, rgba(0,0,0,.5), url("a;b"));
+color: red;`,
+    ],
+    [
+      "a single-quoted value",
+      `content: 'a;b';
+color: red;`,
+    ],
+  ])("survives %s", (_case, css) => {
+    expect(normalize(roundTrip(css))).toBe(normalize(css));
+  });
+
+  test("keeps an edited property without shredding its siblings", () => {
+    const css = `background-image: url("data:image/svg+xml;utf8,<svg/>");
+font-size: 2rem;`;
+    const parsed = parseCssToObject(css);
+    parsed["font-size"] = "2.5rem";
+
+    const next = objectToCss(parsed);
+    expect(next).toContain(`url("data:image/svg+xml;utf8,<svg/>")`);
+    expect(next).toContain("font-size: 2.5rem");
+  });
+
+  test.each([
+    [
+      "an unmatched comment marker",
+      "url(https://example.invalid/image?accept=image/*)",
+    ],
+    ["paired comment markers", "url(https://example.invalid/a/*b*/c.svg)"],
+    ["an uppercase URL name", "URL(https://example.invalid/a/*b.svg)"],
+    ["a simple escaped URL name", String.raw`\url(image/*icon.svg)`],
+    ["a hex-escaped URL name", String.raw`u\72l(image/*icon.svg)`],
+    ["a six-digit URL name escape", String.raw`\000075rl(image/*icon.svg)`],
+    ["an escape terminator", String.raw`\75 rl(image/*icon.svg)`],
+    ["a CRLF escape terminator", "\\75\r\nrl(image/*icon.svg)"],
+    ["leading CSS whitespace", "url( \t\r\n\fimage/*icon.svg)"],
+    ["a leading comment marker", "url(/*icon.svg)"],
+    [
+      "an escaped closing parenthesis",
+      String.raw`url(image/*icon\);variant.svg)`,
+    ],
+    ["a nested URL", "image-set(url(image/*icon.svg) 1x)"],
+    ["a quoted URL after whitespace", 'url( "image/*);variant.svg")'],
+  ])("keeps declarations separate after a URL with %s", (_case, value) => {
+    const css = `background-image: ${value};\ncolor: red;\nfont-size: 32px;`;
+
+    expect(parseCssToObject(css)).toEqual({
+      "background-image": value,
+      color: "red",
+      "font-size": "32px",
+    });
+    expect(roundTrip(css)).toBe(css);
+  });
+
+  test("recognizes an unquoted URL after a CDO token", () => {
+    const css = "--image: <!--url(image/*icon.svg);\ncolor: red;";
+
+    expect(parseCssToObject(css)).toEqual({
+      "--image": "<!--url(image/*icon.svg)",
+      color: "red",
+    });
+    expect(roundTrip(css)).toBe(css);
+  });
+
+  test.each([
+    ["a regular function", 'var(--image, /* ) ; " */ none)'],
+    ["a function name ending in url", 'myurl(/* ) ; " */ none)'],
+    ["whitespace before the parenthesis", 'url (/* ) ; " */ none)'],
+    ["a comment before the parenthesis", 'url/**/(/* ) ; " */ none)'],
+    ["a dimension token", '1url(/* ) ; " */ none)'],
+    ["a hash token", '#url(/* ) ; " */ none)'],
+    ["an at-keyword token", '@url(/* ) ; " */ none)'],
+    ["a quoted URL function", 'url("image.svg" /* ) ; \" */)'],
+  ])("preserves ordinary comments in %s", (_case, value) => {
+    const css = `--image: ${value};\ncolor: red;\nfont-size: 32px;`;
+
+    expect(parseCssToObject(css)).toEqual({
+      "--image": value,
+      color: "red",
+      "font-size": "32px",
+    });
+    expect(roundTrip(css)).toBe(css);
+  });
+
+  test.each([
+    ["an escaped opening parenthesis", "font-family", String.raw`Font\(`],
+    ["an escaped closing parenthesis", "font-family", String.raw`Font\)`],
+    ["an escaped double quote", "font-family", String.raw`Font\"`],
+    ["an escaped single quote", "font-family", String.raw`Font\'`],
+    ["an escaped semicolon", "font-family", String.raw`Font\;Variant`],
+    [
+      "an odd backslash run before an opening parenthesis",
+      "font-family",
+      String.raw`Font\\\(`,
+    ],
+    [
+      "an even backslash run before a delimiter",
+      "font-family",
+      String.raw`Font\\`,
+    ],
+    [
+      "an escaped closing parenthesis in a URL",
+      "background-image",
+      String.raw`url(icon\);variant.svg)`,
+    ],
+    [
+      "an escaped slash before an asterisk in a URL",
+      "background-image",
+      String.raw`url(icon\/*variant.svg)`,
+    ],
+  ])(
+    "keeps declarations separate after %s outside strings",
+    (_case, property, value) => {
+      const css = `${property}: ${value};\ntext-shadow: 1px 1px black;\ncolor: white;`;
+
+      expect(parseCssToObject(css)).toEqual({
+        [property]: value,
+        "text-shadow": "1px 1px black",
+        color: "white",
+      });
+      expect(roundTrip(css)).toBe(css);
+    }
+  );
+
+  describe.each([
+    ["an escaped double quote", String.raw`"a\";b"`],
+    ["an escaped single quote", String.raw`'a\';b'`],
+    ["an odd backslash run before a double quote", String.raw`"a\\\";b"`],
+    ["an odd backslash run before a single quote", String.raw`'a\\\';b'`],
+    ["an even backslash run before a closing double quote", String.raw`"a\\"`],
+    [
+      "an even backslash run before a closing single quote",
+      String.raw`'a\\\\'`,
+    ],
+  ])("with %s", (_case, content) => {
+    const css = `content: ${content};\nfont-size: 2rem;\ntext-shadow: 1px 1px black;\ncolor: white;`;
+
+    test("parses each following declaration separately", () => {
+      expect(parseCssToObject(css)).toEqual({
+        content,
+        "font-size": "2rem",
+        "text-shadow": "1px 1px black",
+        color: "white",
+      });
+    });
+
+    test("updates a following declaration without changing the quoted value", () => {
+      const parsed = parseCssToObject(css);
+      parsed["font-size"] = "2.5rem";
+
+      expect(objectToCss(parsed)).toBe(
+        `content: ${content};\nfont-size: 2.5rem;\ntext-shadow: 1px 1px black;\ncolor: white;`
+      );
+    });
+
+    test("removes a following declaration without changing its neighbors", () => {
+      const parsed = parseCssToObject(css);
+      delete parsed["text-shadow"];
+
+      expect(objectToCss(parsed)).toBe(
+        `content: ${content};\nfont-size: 2rem;\ncolor: white;`
+      );
+    });
+  });
+});
+
+describe("Subtitle advanced controls", () => {
+  // 2e45756 的两条房规：Grid container 必须是折叠内容的直接子节点（用 Fragment
+  // 而不是 Box 包一层），且项目已全局删除 lg={3}。
+  test("keeps the long-tail grid directly inside the accordion at lg=6", () => {
+    const view = renderSubtitle();
+
+    act(() =>
+      view.container.querySelector(".MuiAccordionSummary-root").click()
+    );
+    const content = view.container.querySelector(
+      ".kt-settings-advanced__content"
+    );
+
+    expect(
+      content.firstElementChild.classList.contains("MuiGrid-container")
+    ).toBe(true);
+    expect(
+      content.querySelectorAll(".MuiGrid-grid-lg-6").length
+    ).toBeGreaterThan(0);
+    expect(content.querySelector(".MuiGrid-grid-lg-3")).toBeNull();
+
+    view.unmount();
+  });
+});
+
+describe("Subtitle page copy", () => {
+  // 本文件把 useI18n mock 成恒等函数，渲染断言无法发现未注册或缺少翻译的 key。
+  // 因此从源码提取单参数和带 fallback 的调用，再逐一校验 I18N。
+  test("covers every page copy key in all supported UI languages", () => {
+    const source = fs.readFileSync(path.join(__dirname, "Subtitle.js"), "utf8");
+    const keys = new Set(
+      Array.from(
+        source.matchAll(/\bi18n\(\s*["'`]([a-zA-Z0-9_]+)["'`]/g),
+        (match) => match[1]
+      )
+    );
+
+    expect(keys.size).toBeGreaterThan(0);
+    for (const key of keys) {
+      for (const [language] of UI_LANGS) {
+        expect(I18N[key]?.[language]).toEqual(expect.any(String));
+        expect(I18N[key][language]).not.toBe("");
+      }
+    }
+  });
+});
+
+describe("hover lookup dismissal settings", () => {
+  test("legacy settings show the two-second default with integer bounds", () => {
+    const view = renderSubtitle({ hoverLookupCloseDelay: undefined });
+    const input = view.container.querySelector(
+      'input[name="hoverLookupCloseDelay"]'
+    );
+    expect(input.value).toBe("2");
+    expect([input.min, input.max, input.step]).toEqual(["0", "30", "1"]);
+    expect(input.disabled).toBe(false);
+    expect(view.container.textContent).toContain(
+      "subtitle_hover_lookup_close_delay_description"
+    );
+    view.unmount();
+  });
+  test("disabled lookup retains the saved delay", () => {
+    const view = renderSubtitle({
+      hoverLookupMode: "off",
+      hoverLookupCloseDelay: 7,
+    });
+    const input = view.container.querySelector(
+      'input[name="hoverLookupCloseDelay"]'
+    );
+    expect(input.disabled).toBe(true);
+    expect(input.value).toBe("7");
+    view.unmount();
+  });
+  test.each([0, 5, 30])(
+    "saves a %s second delay and displays it on the next render",
+    (value) => {
+      const view = renderSubtitle({ hoverLookupMode: "on" });
+      const input = view.container.querySelector(
+        'input[name="hoverLookupCloseDelay"]'
+      );
+      act(() => Simulate.change(input, { target: { value: String(value) } }));
+      act(() => Simulate.blur(input));
+      expect(view.updateSubtitle).toHaveBeenCalledWith({
+        hoverLookupCloseDelay: value,
+      });
+      view.unmount();
+      const saved = renderSubtitle({ hoverLookupCloseDelay: value });
+      expect(
+        saved.container.querySelector('input[name="hoverLookupCloseDelay"]')
+          .value
+      ).toBe(String(value));
+      saved.unmount();
+    }
+  );
+});

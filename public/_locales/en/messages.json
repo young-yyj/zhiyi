@@ -1,0 +1,38 @@
+{
+  "app_name": {
+    "message": "Zhiyi"
+  },
+  "app_description": {
+    "message": "Zhiyi: a private DeepSeek bilingual translation extension that inserts Chinese translations beneath the original text."
+  },
+  "translate_selection": {
+    "message": "Translate \"%s\""
+  },
+  "toggle_translate": {
+    "message": "Toggle Translation"
+  },
+  "toggle_translate_only": {
+    "message": "Show translation only"
+  },
+  "toggle_style": {
+    "message": "Toggle Styles"
+  },
+  "open_options": {
+    "message": "Open Setting"
+  },
+  "open_tranbox": {
+    "message": "Open Popup Box"
+  },
+  "open_separate_window": {
+    "message": "Open Independent Window"
+  },
+  "toggle_tranbox": {
+    "message": "Toggle Translation Box"
+  },
+  "image_screenshot_command": {
+    "message": "Screenshot Translation"
+  },
+  "image_screenshot": {
+    "message": "Screenshot Translation"
+  }
+}

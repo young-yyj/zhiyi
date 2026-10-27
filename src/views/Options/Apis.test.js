@@ -1,0 +1,2905 @@
+import { act, StrictMode, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { Simulate } from "react-dom/test-utils";
+import Apis from "./Apis";
+import { SettingsSearchContext } from "./SettingsSearchTarget";
+import {
+  DEFAULT_API_LIST,
+  OPT_TRANS_BUILTINAI,
+  GEMINI_INTERACTIONS_URL,
+  OPT_TRANS_OPENAI,
+  OPT_TRANS_OPENROUTER,
+  OPT_TRANS_GEMINI,
+  OPT_TRANS_GEMINI_2,
+  OPT_TRANS_QWENMT,
+  OPT_TRANS_MICROSOFT,
+  OPT_TRANS_YANDEX,
+  OPT_TRANS_YANDEXFREE,
+  PROMPT_CATEGORY_BATCH_SYSTEM,
+} from "../../config";
+import { fetchModelCatalog } from "../../libs/modelList";
+import { apiTranslate } from "../../apis";
+import { SettingProvider } from "../../hooks/Setting";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+HTMLElement.prototype.scrollTo = jest.fn();
+const mockConfirm = jest.fn();
+const mockAlertInfo = jest.fn();
+const mockUsePromptList = jest.fn(() => ({ prompts: [] }));
+
+jest.mock("../../hooks/I18n", () => {
+  const i18n = (key, fallback) =>
+    /^(plugin_|capability_|service_|provider_plugins|api_source_type_)/.test(
+      key
+    )
+      ? require("../../config/locales/localAi").LOCAL_AI_I18N[key]?.zh ||
+        require("../../config/i18n").newI18n("zh")(key, fallback)
+      : fallback || key;
+  return { useI18n: () => i18n };
+});
+
+jest.mock("../../hooks/Api", () => ({
+  ...jest.requireActual("../../hooks/Api"),
+  useApiList: jest.fn(),
+  useApiItem: jest.fn(),
+}));
+
+jest.mock("../../hooks/Prompt", () => ({
+  usePromptList: () => mockUsePromptList(),
+}));
+
+jest.mock("../../hooks/Confirm", () => ({
+  useConfirm: () => mockConfirm,
+}));
+
+jest.mock("../../hooks/Alert", () => ({
+  useAlert: () => ({
+    info: mockAlertInfo,
+    success: jest.fn(),
+    error: jest.fn(),
+  }),
+}));
+
+jest.mock("../../hooks/Setting", () => {
+  const { createContext, useContext } = jest.requireActual("react");
+  const SettingContext = createContext({
+    setting: { prompts: [], subtitleSetting: {}, uiLang: "zh" },
+  });
+  return {
+    SettingProvider: SettingContext.Provider,
+    useSetting: () => useContext(SettingContext),
+  };
+});
+
+jest.mock("../../apis", () => ({
+  apiTranslate: jest.fn(),
+}));
+
+jest.mock("../../libs/modelList", () => ({
+  fetchModelCatalog: jest.fn(),
+}));
+
+jest.mock("./LocalModelSelect", () => {
+  const React = require("react");
+  return function LocalModelSelect({ value, onChange }) {
+    return React.createElement(
+      "div",
+      null,
+      "本地模型选择",
+      React.createElement("input", {
+        name: "modelRef",
+        value: value || "",
+        onChange: (event) => onChange(event.target.value),
+      })
+    );
+  };
+});
+
+jest.mock("./ReusableAutocomplete", () => {
+  return function MockReusableAutocomplete({
+    name,
+    label,
+    value,
+    options = [],
+    onChange,
+    onFocus,
+    textFieldProps = {},
+  }) {
+    return (
+      <label>
+        {label}
+        <input
+          name={name}
+          value={value || ""}
+          onChange={onChange}
+          onFocus={onFocus}
+          data-options={options.join(",")}
+          aria-invalid={textFieldProps.error ? "true" : "false"}
+        />
+        {textFieldProps.helperText ? (
+          <span>{textFieldProps.helperText}</span>
+        ) : null}
+      </label>
+    );
+  };
+});
+const { useApiList, useApiItem } = require("../../hooks/Api");
+
+function createApi(overrides = {}) {
+  return {
+    enabledCapabilities: ["translate", "segmentSubtitle", "dictionary"],
+    apiSlug: "OpenAI",
+    apiName: "OpenAI",
+    apiType: OPT_TRANS_OPENAI,
+    url: "https://api.openai.com/v1/chat/completions",
+    key: "sk-test",
+    model: "gpt-4",
+    modelListUrl: "https://api.openai.com/v1/models",
+    sortOrder: 0,
+    httpTimeout: 30,
+    ...overrides,
+  };
+}
+
+describe("service save feedback", () => {
+  test("a local ASR-only service exposes the timeout without expanding advanced translation settings", async () => {
+    const update = jest.fn(async () => {});
+    const view = await renderApis(
+      createApi({
+        apiType: "LocalAI",
+        sourceType: "local",
+        modelRef: "whisper-small-timestamped",
+        enabledCapabilities: ["transcribe"],
+        httpTimeout: undefined,
+      }),
+      update
+    );
+    try {
+      const input = getInput(view.container, "httpTimeout");
+      expect(input.value).toBe("120");
+      expect([input.min, input.max]).toEqual(["1", "600"]);
+      await act(async () =>
+        Simulate.change(input, { target: { value: "300" } })
+      );
+      await act(async () => Simulate.click(getSaveButton(view.container)));
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({ httpTimeout: 300 })
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("ASR chunk duration rejects invalid drafts and saves valid integers", async () => {
+    const update = jest.fn(async () => {});
+    const view = await renderApis(
+      createApi({
+        apiType: "LocalAI",
+        sourceType: "local",
+        modelRef: "whisper-base-timestamped",
+        device: "webgpu",
+        enabledCapabilities: ["transcribe"],
+      }),
+      update
+    );
+    try {
+      expect(getInput(view.container, "asrMaxDurationSeconds").value).toBe(
+        "30"
+      );
+      const timestampSupport = view.container.querySelector(
+        'select[name="asrTimestampSupport"]'
+      );
+      expect(timestampSupport.disabled).toBe(true);
+      expect(timestampSupport.value).toBe("supported");
+      for (const value of ["", "0", "1.5", "301"]) {
+        await act(async () =>
+          Simulate.change(getInput(view.container, "asrMaxDurationSeconds"), {
+            target: { value },
+          })
+        );
+        await act(async () => Simulate.click(getSaveButton(view.container)));
+        expect(update).not.toHaveBeenCalled();
+        const dialog = document.querySelector('[role="dialog"]');
+        expect(dialog).not.toBeNull();
+        await act(async () =>
+          Array.from(dialog.querySelectorAll("button"))
+            .find((button) => button.textContent === "知道了")
+            .click()
+        );
+      }
+      await act(async () =>
+        Simulate.change(getInput(view.container, "asrMaxDurationSeconds"), {
+          target: { value: "12" },
+        })
+      );
+      await act(async () => Simulate.click(getSaveButton(view.container)));
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({ asrMaxDurationSeconds: 12 })
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("saves an out-of-range native draft before warning and keeps a pinned detail expanded", async () => {
+    let complete;
+    const update = jest.fn(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        })
+    );
+    const view = await renderApis(createApi({ sortOrder: -1 }), update);
+    await act(async () =>
+      Simulate.change(getInput(view.container, "temperature"), {
+        target: { value: "5" },
+      })
+    );
+    await act(async () =>
+      Simulate.blur(getInput(view.container, "temperature"))
+    );
+    await act(async () => Simulate.click(getSaveButton(view.container)));
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ temperature: 5 })
+    );
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(getSaveButton(view.container).disabled).toBe(true);
+    await act(async () => complete());
+    expect(document.querySelector('[role="dialog"]').textContent).toContain(
+      "配置已保存"
+    );
+    expect(document.querySelector('[role="dialog"]').textContent).toContain(
+      "temperature 数值超出"
+    );
+    expect(getInput(view.container, "temperature").value).toBe("5");
+    await act(async () =>
+      Array.from(document.querySelectorAll("button"))
+        .find((button) => button.textContent === "知道了")
+        .click()
+    );
+    expect(update).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
+  test("native storage failure restores the edited draft after optimistic rollback and permits retry", async () => {
+    const original = createApi();
+    let fail;
+    const update = jest.fn(
+      () =>
+        new Promise((_, reject) => {
+          fail = reject;
+        })
+    );
+    const view = await renderApis(original, update);
+    await act(async () =>
+      Simulate.change(getInput(view.container, "apiName"), {
+        target: { name: "apiName", value: "Keep draft" },
+      })
+    );
+    await act(async () => Simulate.click(getSaveButton(view.container)));
+    const saved = update.mock.calls[0][0];
+    await view.rerender([saved]);
+    await view.rerender([original]);
+    await act(async () => fail(new Error("写入失败")));
+    expect(document.querySelector('[role="dialog"]').textContent).toContain(
+      "保存失败"
+    );
+    expect(getInput(view.container, "apiName").value).toBe("Keep draft");
+    expect(getSaveButton(view.container).disabled).toBe(false);
+    await act(async () =>
+      Array.from(document.querySelectorAll("button"))
+        .find((button) => button.textContent === "知道了")
+        .click()
+    );
+    update.mockResolvedValueOnce(undefined);
+    await act(async () => Simulate.click(getSaveButton(view.container)));
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(document.querySelector("#service-feedback-title")).toBeNull();
+    view.unmount();
+  });
+});
+
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function renderApis(
+  api = createApi(),
+  update = jest.fn(),
+  prompts = [],
+  searchNavigation = {}
+) {
+  mockUsePromptList.mockReturnValue({ prompts });
+  let apis = Array.isArray(api) ? api : [api];
+  const reset = jest.fn();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const apiListValue = {
+    addApi: jest.fn(),
+    deleteApi: jest.fn(),
+    deleteApis: jest.fn(),
+    pinApis: jest.fn(),
+    disableApis: jest.fn(),
+    enableApis: jest.fn(),
+    copyApi: jest.fn(),
+    alphaSortApis: jest.fn(),
+    reorderApis: jest.fn(),
+  };
+
+  const configureApiMocks = () => {
+    useApiList.mockReturnValue({ transApis: apis, ...apiListValue });
+    useApiItem.mockImplementation((apiSlug) => ({
+      api: apis.find((item) => item.apiSlug === apiSlug),
+      update,
+      reset,
+    }));
+  };
+
+  configureApiMocks();
+
+  const render = () => (
+    <div className="kt-m3-root">
+      <SettingsSearchContext.Provider value={searchNavigation}>
+        <Apis />
+      </SettingsSearchContext.Provider>
+    </div>
+  );
+
+  await act(async () => {
+    root.render(render());
+  });
+  await flushEffects();
+
+  return {
+    apiListValue,
+    container,
+    rerender: async (nextApis) => {
+      apis = nextApis;
+      configureApiMocks();
+      await act(async () => {
+        root.render(render());
+      });
+      await flushEffects();
+    },
+    search: async (navigation) => {
+      searchNavigation = navigation;
+      await act(async () => root.render(render()));
+      await flushEffects();
+    },
+    reset,
+    update,
+    unmount: () => {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+async function renderStatefulApis(apis, strictMode = false) {
+  mockUsePromptList.mockReturnValue({ prompts: [] });
+  const actualApiHooks = jest.requireActual("../../hooks/Api");
+  useApiList.mockImplementation(actualApiHooks.useApiList);
+  useApiItem.mockImplementation(actualApiHooks.useApiItem);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  let currentSetting;
+  let setCurrentSetting;
+
+  function Harness() {
+    const [setting, setSetting] = useState({
+      transApis: apis,
+      prompts: [],
+      subtitleSetting: {},
+      uiLang: "zh",
+    });
+    currentSetting = setting;
+    setCurrentSetting = setSetting;
+    return (
+      <SettingProvider value={{ setting, updateSetting: setSetting }}>
+        <div className="kt-m3-root">
+          <Apis />
+        </div>
+      </SettingProvider>
+    );
+  }
+
+  await act(async () => {
+    root.render(
+      strictMode ? (
+        <StrictMode>
+          <Harness />
+        </StrictMode>
+      ) : (
+        <Harness />
+      )
+    );
+  });
+  await flushEffects();
+
+  return {
+    container,
+    get setting() {
+      return currentSetting;
+    },
+    updateSetting: async (updater) => {
+      await act(async () => setCurrentSetting(updater));
+      await flushEffects();
+    },
+    unmount: () => {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+function getInput(container, name) {
+  const input = container.querySelector(`input[name="${name}"]`);
+  if (!input) {
+    throw new Error(`Unable to find input named ${name}`);
+  }
+  return input;
+}
+
+function getSaveButton(container) {
+  return Array.from(container.querySelectorAll("button")).find(
+    (button) => button.textContent === "save"
+  );
+}
+
+function getApiListItem(container, apiName) {
+  const item = Array.from(
+    container.querySelectorAll(".MuiListItemButton-root")
+  ).find((element) => element.textContent.includes(apiName));
+  if (!item) {
+    throw new Error(`Unable to find list item for ${apiName}`);
+  }
+  return item;
+}
+
+async function editUrlDraft(container) {
+  const urlInput = getInput(container, "url");
+  await act(async () => {
+    Simulate.change(urlInput, {
+      target: { name: "url", value: "https://draft.example/v1" },
+    });
+  });
+  return urlInput;
+}
+
+describe("Apis search navigation", () => {
+  afterEach(() => jest.clearAllMocks());
+
+  test("reselects a compatible service on another click of the same result", async () => {
+    const microsoft = createApi({
+      apiSlug: "Microsoft",
+      apiName: "Microsoft",
+      apiType: OPT_TRANS_MICROSOFT,
+    });
+    const update = jest.fn();
+    const view = await renderApis([createApi(), microsoft], update, [], {
+      target: "use_stream",
+      navigationKey: "first",
+    });
+    expect(view.container.querySelector('[name="useStream"]')).not.toBeNull();
+    await act(async () => getApiListItem(view.container, "Microsoft").click());
+    expect(view.container.querySelector('[name="useStream"]')).toBeNull();
+
+    await view.search({ target: "use_stream", navigationKey: "second" });
+
+    expect(getInput(view.container, "apiName").value).toBe("OpenAI");
+    expect(view.container.querySelector('[name="useStream"]')).not.toBeNull();
+    expect(update).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  test("allows retrying a search after cancelling discard of an API draft", async () => {
+    const microsoft = createApi({
+      apiSlug: "Microsoft",
+      apiName: "Microsoft",
+      apiType: OPT_TRANS_MICROSOFT,
+    });
+    const view = await renderApis([microsoft, createApi()]);
+    await act(async () => {
+      Simulate.change(getInput(view.container, "apiName"), {
+        target: { name: "apiName", value: "Unsaved Microsoft" },
+      });
+    });
+    mockConfirm.mockResolvedValueOnce(false);
+
+    await view.search({ target: "use_stream", navigationKey: "first" });
+
+    expect(getInput(view.container, "apiName").value).toBe("Unsaved Microsoft");
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await view.search({ target: "use_stream", navigationKey: "second" });
+
+    expect(getInput(view.container, "apiName").value).toBe("OpenAI");
+    expect(view.container.querySelector('[name="useStream"]')).not.toBeNull();
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+    view.unmount();
+  });
+});
+
+describe("Apis ordering and master-detail layout", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("offers explicit A-Z and Z-A actions and starts with A-Z", async () => {
+    const view = await renderApis([
+      createApi({ apiSlug: "alpha", apiName: "Alpha", sortOrder: 0 }),
+      createApi({ apiSlug: "charlie", apiName: "Charlie", sortOrder: 1 }),
+      createApi({ apiSlug: "beta", apiName: "Beta", sortOrder: 2 }),
+    ]);
+    const sortButton = view.container.querySelector("#api-sort-button");
+
+    expect(sortButton.textContent).toContain("Custom");
+    expect(sortButton.getAttribute("aria-label")).toContain("Custom");
+
+    await act(async () => {
+      Simulate.click(sortButton);
+    });
+
+    const sortItems = Array.from(
+      document.body.querySelectorAll('[role="menuitemradio"]')
+    );
+    const ascendingItem = sortItems.find(
+      (item) => item.textContent.trim() === "A–Z"
+    );
+    const descendingItem = sortItems.find(
+      (item) => item.textContent.trim() === "Z–A"
+    );
+
+    expect(ascendingItem).toBeDefined();
+    expect(descendingItem).toBeDefined();
+    expect(ascendingItem.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      Simulate.click(ascendingItem);
+    });
+
+    expect(view.apiListValue.alphaSortApis).toHaveBeenCalledWith("asc");
+
+    await act(async () => {
+      Simulate.click(sortButton);
+    });
+    const reopenedDescendingItem = Array.from(
+      document.body.querySelectorAll('[role="menuitemradio"]')
+    ).find((item) => item.textContent.trim() === "Z–A");
+
+    await act(async () => {
+      Simulate.click(reopenedDescendingItem);
+    });
+
+    expect(view.apiListValue.alphaSortApis).toHaveBeenCalledWith("desc");
+
+    view.unmount();
+  });
+
+  test("disables alphabetical sorting when fewer than two APIs can move", async () => {
+    const view = await renderApis(createApi());
+
+    expect(view.container.querySelector("#api-sort-button").disabled).toBe(
+      true
+    );
+
+    view.unmount();
+  });
+
+  test("reflects the persisted order and becomes custom after drag reorder", async () => {
+    const alpha = createApi({
+      apiSlug: "alpha",
+      apiName: "Alpha",
+      sortOrder: 0,
+    });
+    const beta = createApi({
+      apiSlug: "beta",
+      apiName: "Beta",
+      sortOrder: 1,
+    });
+    const charlie = createApi({
+      apiSlug: "charlie",
+      apiName: "Charlie",
+      sortOrder: 2,
+    });
+    const view = await renderApis([alpha, beta, charlie]);
+    const sortButton = view.container.querySelector("#api-sort-button");
+
+    expect(sortButton.textContent).toContain("A–Z");
+
+    const alphaCard = getApiListItem(view.container, "Alpha");
+    const charlieCard = getApiListItem(view.container, "Charlie");
+    const dragHandle = alphaCard.querySelector('[draggable="true"]');
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      getData: jest.fn(() => "alpha"),
+      setData: jest.fn(),
+    };
+
+    await act(async () => {
+      Simulate.dragStart(dragHandle, { dataTransfer });
+    });
+    await act(async () => {
+      Simulate.dragOver(charlieCard.closest("li"), { dataTransfer });
+      Simulate.drop(charlieCard.closest("li"), { dataTransfer });
+    });
+
+    expect(view.apiListValue.reorderApis).toHaveBeenCalledWith(
+      "alpha",
+      "charlie"
+    );
+
+    view.apiListValue.reorderApis.mockClear();
+    await act(async () => {
+      Simulate.keyDown(charlieCard, { key: "ArrowUp", altKey: true });
+      await Promise.resolve();
+    });
+    expect(view.apiListValue.reorderApis).toHaveBeenCalledWith(
+      "charlie",
+      "beta"
+    );
+    expect(charlieCard.getAttribute("aria-keyshortcuts")).toContain(
+      "Alt+ArrowUp"
+    );
+
+    await view.rerender([
+      { ...beta, sortOrder: 0 },
+      { ...charlie, sortOrder: 1 },
+      { ...alpha, sortOrder: 2 },
+    ]);
+
+    expect(
+      view.container.querySelector("#api-sort-button").textContent
+    ).toContain("Custom");
+
+    view.unmount();
+  });
+
+  test("uses one-dimensional interactive cards and layered detail actions", async () => {
+    const view = await renderApis([
+      createApi({ apiSlug: "alpha", apiName: "Alpha", sortOrder: 0 }),
+      createApi({ apiSlug: "beta", apiName: "Beta", sortOrder: 1 }),
+    ]);
+    const masterDetail = view.container.querySelector(".kt-api-master-detail");
+    const list = masterDetail.querySelector(".kt-api-list");
+    const selectedCard = getApiListItem(view.container, "Alpha");
+    const detail = masterDetail.querySelector(".kt-api-detail");
+
+    expect(view.container.querySelector(".kt-api-grid")).toBeNull();
+    expect(list.querySelectorAll(".kt-api-list__card")).toHaveLength(2);
+    expect(selectedCard.classList.contains("Mui-selected")).toBe(true);
+    expect(selectedCard.getAttribute("aria-current")).toBe("true");
+    expect(
+      selectedCard.parentElement.classList.contains("kt-api-list__item")
+    ).toBe(true);
+    expect(selectedCard.parentElement.classList.contains("Mui-selected")).toBe(
+      false
+    );
+    expect(masterDetail.children[0]).toBe(list);
+    expect(masterDetail.children[1]).toBe(detail);
+
+    const disabledSwitch = detail.querySelector(
+      '.kt-api-detail__header input[name="isDisabled"]'
+    );
+    expect(disabledSwitch).not.toBeNull();
+    expect(
+      detail.querySelector('.kt-api-detail__header input[name="isPinned"]')
+    ).not.toBeNull();
+
+    expect(disabledSwitch.checked).toBe(false);
+    await act(async () => disabledSwitch.click());
+    expect(disabledSwitch.checked).toBe(true);
+    await act(async () => disabledSwitch.click());
+    expect(disabledSwitch.checked).toBe(false);
+    expect(getInput(detail, "apiName").value).toBe("Alpha");
+    expect(getInput(detail, "model").value).toBe("gpt-4");
+
+    expect(detail.querySelector('input[name="sourceType"]')).toBeNull();
+    expect(
+      detail.querySelector(".kt-api-detail__header").textContent
+    ).toContain("网络");
+    const capabilitiesInput = getInput(detail, "enabledCapabilities");
+    expect(
+      getInput(detail, "model").compareDocumentPosition(capabilitiesInput) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+
+    const footer = detail.querySelector(".kt-api-detail__footer");
+    const footerButtonTexts = Array.from(footer.querySelectorAll("button")).map(
+      (button) => button.textContent
+    );
+    expect(footerButtonTexts).toEqual(
+      expect.arrayContaining(["save", "api_actions"])
+    );
+    const testCard = detail.querySelector(".kt-service-test");
+    const configCard = detail.querySelector(".kt-service-configuration");
+    expect(detail.querySelectorAll(".kt-service-card")).toHaveLength(2);
+    expect(
+      configCard.compareDocumentPosition(testCard) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(testCard.textContent).toContain("执行测试");
+    expect(testCard.textContent).toContain("快捷翻译测试");
+    expect(footer.textContent).not.toContain("快捷翻译测试");
+    expect(footer.textContent).not.toContain("restore_default");
+    expect(footer.textContent).not.toContain("copy_api");
+    expect(footer.textContent).not.toContain("delete");
+
+    const moreButton = footer.querySelector(
+      '[id^="api-detail-actions-button-"]'
+    );
+    expect(moreButton.getAttribute("aria-haspopup")).toBe("menu");
+
+    await act(async () => {
+      Simulate.click(moreButton);
+    });
+
+    const actionMenu = document.body.querySelector(
+      `#api-detail-actions-menu-alpha`
+    );
+    expect(actionMenu.textContent).toContain("restore_default");
+    expect(actionMenu.textContent).toContain("copy_api");
+    expect(actionMenu.textContent).toContain("delete");
+
+    view.unmount();
+  });
+
+  test("uses the service card itself as the bulk-selection control", async () => {
+    const view = await renderApis([
+      createApi({ apiSlug: "alpha", apiName: "Alpha", sortOrder: 0 }),
+      createApi({ apiSlug: "beta", apiName: "Beta", sortOrder: 1 }),
+    ]);
+    const bulkButton = Array.from(
+      view.container.querySelectorAll("button")
+    ).find((button) => button.textContent === "bulk_actions");
+    expect(bulkButton.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => Simulate.click(bulkButton));
+    expect(bulkButton.getAttribute("aria-pressed")).toBe("true");
+
+    const bulkCards = Array.from(
+      view.container.querySelectorAll('.kt-api-list__card[role="checkbox"]')
+    );
+    expect(bulkCards).toHaveLength(2);
+    expect(bulkCards[1].getAttribute("aria-checked")).toBe("false");
+    expect(bulkCards[1].querySelector("input")).toBeNull();
+
+    await act(async () => {
+      Simulate.keyDown(bulkCards[1], { key: " " });
+      Simulate.keyUp(bulkCards[1], { key: " " });
+    });
+    expect(bulkCards[1].getAttribute("aria-checked")).toBe("true");
+    expect(getInput(view.container, "apiName").value).toBe("Alpha");
+    expect(mockConfirm).not.toHaveBeenCalled();
+
+    view.unmount();
+  });
+
+  test.each(["Escape", "backdrop click", "service selection"])(
+    "removes the themed add menu and restores interaction after %s",
+    async (closeMethod) => {
+      jest.useFakeTimers();
+      let view;
+
+      try {
+        view = await renderApis(createApi());
+        const addButton = view.container.querySelector("#add-api-button");
+        const bulkButton = Array.from(
+          view.container.querySelectorAll("button")
+        ).find((button) => button.textContent === "bulk_actions");
+
+        await act(async () => {
+          addButton.focus();
+          Simulate.click(addButton);
+        });
+        act(() => jest.advanceTimersByTime(1000));
+
+        const menu = document.body.querySelector("#add-api-menu");
+        expect(menu).not.toBeNull();
+        expect(menu.closest(".kt-m3-root")).toBe(
+          view.container.querySelector(".kt-m3-root")
+        );
+        expect(menu.textContent).toContain("系统服务");
+        expect(menu.textContent).toContain("网络接口");
+        expect(menu.textContent).toContain("外部插件");
+
+        await act(async () => {
+          if (closeMethod === "Escape") {
+            Simulate.keyDown(menu.querySelector('[role="menu"]'), {
+              key: "Escape",
+            });
+          } else if (closeMethod === "backdrop click") {
+            Simulate.click(menu.querySelector(".MuiBackdrop-root"));
+          } else {
+            Simulate.click(
+              Array.from(menu.querySelectorAll('[role="menuitem"]')).find(
+                (item) => item.textContent.includes("网络接口")
+              )
+            );
+          }
+        });
+        act(() => jest.advanceTimersByTime(1000));
+        if (closeMethod === "service selection") {
+          await act(async () =>
+            Simulate.click(
+              document.body.querySelector(
+                '[role="menu"][aria-label="网络接口"] [role="menuitem"]'
+              )
+            )
+          );
+          act(() => jest.advanceTimersByTime(1000));
+        }
+
+        expect(document.body.querySelector("#add-api-menu")).toBeNull();
+        expect(view.apiListValue.addApi).toHaveBeenCalledTimes(
+          closeMethod === "service selection" ? 1 : 0
+        );
+
+        await act(async () => Simulate.click(bulkButton));
+        expect(bulkButton.getAttribute("aria-pressed")).toBe("true");
+
+        await act(async () => Simulate.click(addButton));
+        act(() => jest.advanceTimersByTime(1000));
+        expect(
+          view.container.querySelector('#add-api-menu [role="menu"]')
+        ).not.toBeNull();
+      } finally {
+        view?.unmount();
+        jest.useRealTimers();
+      }
+    }
+  );
+});
+
+describe("Apis conditional option groups", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("omits the runtime option shell when the API has no matching controls", async () => {
+    const view = await renderApis(
+      createApi({ apiSlug: "BuiltinAI", apiType: OPT_TRANS_BUILTINAI })
+    );
+
+    expect(view.container.querySelector(".kt-api-runtime-options")).toBeNull();
+    for (const name of [
+      "useStream",
+      "streamRenderMode",
+      "useContext",
+      "contextSize",
+    ]) {
+      expect(view.container.querySelector(`[name="${name}"]`)).toBeNull();
+    }
+
+    view.unmount();
+  });
+
+  test("keeps runtime options for APIs that support them", async () => {
+    const view = await renderApis();
+
+    expect(
+      view.container.querySelector(".kt-api-runtime-options")
+    ).not.toBeNull();
+
+    view.unmount();
+  });
+});
+
+describe("Apis model list", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("loads model list once when model input is focused", async () => {
+    fetchModelCatalog.mockResolvedValue({
+      models: ["gpt-4o", "gpt-4.1"],
+      thinkingCapabilities: {},
+    });
+    const view = await renderApis();
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+    });
+
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+    expect(fetchModelCatalog).toHaveBeenCalledWith({
+      apiType: OPT_TRANS_OPENAI,
+      modelListUrl: "https://api.openai.com/v1/models",
+      key: "sk-test",
+      httpTimeout: 30,
+    });
+    expect(modelInput.getAttribute("data-options")).toContain("gpt-4o");
+
+    view.unmount();
+  });
+
+  test("normalizes mandatory OpenRouter thinking without saving metadata", async () => {
+    fetchModelCatalog.mockResolvedValue({
+      models: ["provider/mandatory-model"],
+      thinkingCapabilities: {
+        "provider/mandatory-model": {
+          model: "provider/mandatory-model",
+          supportedEfforts: ["high", "low"],
+          mandatory: true,
+        },
+      },
+    });
+    const update = jest.fn();
+    const view = await renderApis(
+      createApi({
+        apiSlug: "OpenRouter",
+        apiName: "OpenRouter",
+        apiType: OPT_TRANS_OPENROUTER,
+        model: "provider/mandatory-model",
+        modelListUrl: "https://openrouter.ai/api/v1/models",
+        thinkingMode: "disabled",
+      }),
+      update
+    );
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushEffects();
+    expect(view.container.textContent).toContain(
+      "gemini_thinking_minimum_helper"
+    );
+
+    await act(async () => {
+      Simulate.click(getSaveButton(view.container));
+    });
+    const savedApi = update.mock.calls[0][0];
+    expect(savedApi).toMatchObject({
+      thinkingMode: "disabled",
+      thinkingEffort: "low",
+    });
+    expect(savedApi).not.toHaveProperty("thinkingCapability");
+    expect(savedApi).not.toHaveProperty("thinkingCapabilities");
+
+    view.unmount();
+  });
+
+  test("loads OpenRouter capabilities on mode change and reuses the catalog", async () => {
+    fetchModelCatalog.mockResolvedValue({
+      models: ["provider/reasoning-model"],
+      thinkingCapabilities: {
+        "provider/reasoning-model": {
+          model: "provider/reasoning-model",
+          supportedEfforts: ["high", "medium", "low"],
+          defaultEffort: "medium",
+          defaultEnabled: true,
+          mandatory: false,
+        },
+      },
+    });
+    const update = jest.fn();
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_OPENROUTER,
+        apiType: OPT_TRANS_OPENROUTER,
+        model: "provider/reasoning-model",
+        modelListUrl: "https://openrouter.ai/api/v1/models",
+        thinkingMode: "auto",
+        thinkingEffort: "_default",
+      }),
+      update
+    );
+
+    const modeInput = getInput(view.container, "thinkingMode");
+    await act(async () => {
+      Simulate.change(modeInput, {
+        target: { name: "thinkingMode", value: "enabled" },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushEffects();
+
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+    expect(getInput(view.container, "thinkingEffort").value).toBe("medium");
+
+    await act(async () => {
+      Simulate.change(getInput(view.container, "thinkingMode"), {
+        target: { name: "thinkingMode", value: "disabled" },
+      });
+      await Promise.resolve();
+    });
+    await flushEffects();
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      Simulate.click(getSaveButton(view.container));
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thinkingMode: "disabled",
+        thinkingEffort: "none",
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("resets and resolves OpenRouter effort when the model changes", async () => {
+    fetchModelCatalog.mockResolvedValue({
+      models: ["provider/model-a", "provider/model-b"],
+      thinkingCapabilities: {
+        "provider/model-a": {
+          model: "provider/model-a",
+          supportedEfforts: ["high", "low"],
+          defaultEffort: "high",
+          defaultEnabled: true,
+          mandatory: false,
+        },
+        "provider/model-b": {
+          model: "provider/model-b",
+          supportedEfforts: ["low", "minimal"],
+          defaultEffort: "low",
+          defaultEnabled: true,
+          mandatory: false,
+        },
+      },
+    });
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_OPENROUTER,
+        apiType: OPT_TRANS_OPENROUTER,
+        model: "provider/model-a",
+        modelListUrl: "https://openrouter.ai/api/v1/models",
+        thinkingMode: "enabled",
+        thinkingEffort: "high",
+      })
+    );
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushEffects();
+    await act(async () => {
+      Simulate.change(modelInput, {
+        target: { name: "model", value: "provider/model-b" },
+      });
+      await Promise.resolve();
+    });
+    await flushEffects();
+
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+    expect(getInput(view.container, "thinkingEffort").value).toBe("low");
+
+    await act(async () => {
+      Simulate.change(modelInput, {
+        target: { name: "model", value: "provider/unknown-model" },
+      });
+      await Promise.resolve();
+    });
+    await flushEffects();
+    expect(
+      getInput(view.container, "thinkingMode").getAttribute("aria-invalid")
+    ).toBe("true");
+    expect(
+      view.container.querySelector('input[name="thinkingEffort"]')
+    ).toBeNull();
+
+    view.unmount();
+  });
+
+  test("does not load model list without url or key", async () => {
+    const view = await renderApis(createApi({ key: "" }));
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+    });
+
+    expect(fetchModelCatalog).not.toHaveBeenCalled();
+
+    view.unmount();
+  });
+
+  test("keeps manual model input saveable", async () => {
+    const update = jest.fn();
+    const view = await renderApis(createApi(), update);
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.change(modelInput, {
+        target: {
+          name: "model",
+          value: "manual-model",
+        },
+      });
+    });
+
+    const saveButton = getSaveButton(view.container);
+    await act(async () => {
+      Simulate.click(saveButton);
+    });
+
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "manual-model",
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("shows fetch failure without clearing model", async () => {
+    fetchModelCatalog
+      .mockRejectedValueOnce(new Error("network failed"))
+      .mockResolvedValueOnce({
+        models: ["gpt-4o"],
+        thinkingCapabilities: {},
+      });
+    const view = await renderApis();
+    const modelInput = getInput(view.container, "model");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(modelInput.value).toBe("gpt-4");
+    expect(modelInput.getAttribute("aria-invalid")).toBe("true");
+    expect(view.container.textContent).toContain("model_list_fetch_failed");
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      Simulate.focus(getInput(view.container, "model"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushEffects();
+
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(2);
+    expect(getInput(view.container, "model").getAttribute("aria-invalid")).toBe(
+      "false"
+    );
+    expect(
+      getInput(view.container, "model").getAttribute("data-options")
+    ).toContain("gpt-4o");
+
+    view.unmount();
+  });
+
+  test("retries OpenRouter catalog loading after another mode change", async () => {
+    fetchModelCatalog
+      .mockRejectedValueOnce(new Error("network failed"))
+      .mockResolvedValueOnce({
+        models: ["provider/reasoning-model"],
+        thinkingCapabilities: {
+          "provider/reasoning-model": {
+            model: "provider/reasoning-model",
+            supportedEfforts: ["high", "low"],
+            defaultEffort: "high",
+            defaultEnabled: true,
+            mandatory: false,
+          },
+        },
+      });
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_OPENROUTER,
+        apiType: OPT_TRANS_OPENROUTER,
+        model: "provider/reasoning-model",
+        modelListUrl: "https://openrouter.ai/api/v1/models",
+        thinkingMode: "auto",
+        thinkingEffort: "_default",
+      })
+    );
+
+    await act(async () => {
+      Simulate.change(getInput(view.container, "thinkingMode"), {
+        target: { name: "thinkingMode", value: "enabled" },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushEffects();
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      Simulate.change(getInput(view.container, "thinkingMode"), {
+        target: { name: "thinkingMode", value: "disabled" },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushEffects();
+
+    expect(fetchModelCatalog).toHaveBeenCalledTimes(2);
+    expect(view.container.textContent).not.toContain("model_list_fetch_failed");
+    expect(view.container.textContent).not.toContain(
+      "thinking_unknown_model_helper"
+    );
+
+    view.unmount();
+  });
+
+  test("ignores a failed catalog request after the URL changes", async () => {
+    let rejectRequest;
+    fetchModelCatalog.mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          rejectRequest = reject;
+        })
+    );
+    const view = await renderApis();
+
+    await act(async () => {
+      Simulate.focus(getInput(view.container, "model"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      Simulate.change(getInput(view.container, "modelListUrl"), {
+        target: {
+          name: "modelListUrl",
+          value: "https://api.openai.com/v1/models?fixed=1",
+        },
+      });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rejectRequest(new Error("stale network failure"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getInput(view.container, "model").getAttribute("aria-invalid")).toBe(
+      "false"
+    );
+    expect(view.container.textContent).not.toContain("stale network failure");
+
+    view.unmount();
+  });
+
+  test("ignores a successful catalog request after the URL changes", async () => {
+    let resolveOldRequest;
+    let resolveNewRequest;
+    fetchModelCatalog
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOldRequest = resolve;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveNewRequest = resolve;
+          })
+      );
+    const view = await renderApis();
+
+    await act(async () => {
+      Simulate.focus(getInput(view.container, "model"));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      Simulate.change(getInput(view.container, "modelListUrl"), {
+        target: {
+          name: "modelListUrl",
+          value: "https://api.openai.com/v1/models?current=1",
+        },
+      });
+      await Promise.resolve();
+    });
+    await flushEffects();
+    await act(async () => {
+      Simulate.focus(getInput(view.container, "model"));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveNewRequest({
+        models: ["current-model"],
+        thinkingCapabilities: {},
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveOldRequest({
+        models: ["stale-model"],
+        thinkingCapabilities: {},
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const modelOptions = getInput(view.container, "model").getAttribute(
+      "data-options"
+    );
+    expect(modelOptions).toContain("current-model");
+    expect(modelOptions).not.toContain("stale-model");
+
+    view.unmount();
+  });
+
+  test("resets model list error when url or key changes", async () => {
+    fetchModelCatalog.mockRejectedValue(new Error("network failed"));
+    const view = await renderApis();
+    const modelInput = getInput(view.container, "model");
+    const modelListUrlInput = getInput(view.container, "modelListUrl");
+
+    await act(async () => {
+      Simulate.focus(modelInput);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(modelInput.getAttribute("aria-invalid")).toBe("true");
+    expect(view.container.textContent).toContain("model_list_fetch_failed");
+
+    await act(async () => {
+      Simulate.change(modelListUrlInput, {
+        target: {
+          name: "modelListUrl",
+          value: "https://api.openai.com/v1/models?fixed=1",
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(modelInput.getAttribute("aria-invalid")).toBe("false");
+    expect(view.container.textContent).not.toContain("model_list_fetch_failed");
+
+    view.unmount();
+  });
+});
+
+describe("Apis unsaved API switching", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("keeps the draft and selection when switching APIs is cancelled", async () => {
+    const selectedApi = createApi();
+    const otherApi = createApi({
+      apiSlug: "Other",
+      apiName: "Other",
+      url: "https://other.example/v1",
+    });
+    const view = await renderApis([selectedApi, otherApi]);
+    const urlInput = await editUrlDraft(view.container);
+    mockConfirm.mockResolvedValueOnce(false);
+
+    await act(async () => {
+      Simulate.click(getApiListItem(view.container, otherApi.apiName));
+      await Promise.resolve();
+    });
+
+    expect(mockConfirm).toHaveBeenCalledWith({
+      message: "This API has unsaved changes. Discard them?",
+      confirmText: "discard_changes",
+      cancelText: "cancel",
+    });
+    expect(urlInput.value).toBe("https://draft.example/v1");
+    expect(getInput(view.container, "apiName").value).toBe(selectedApi.apiName);
+
+    view.unmount();
+  });
+
+  test("switches clean APIs without confirmation", async () => {
+    const otherApi = createApi({
+      apiSlug: "Other",
+      apiName: "Other",
+      url: "https://other.example/v1",
+    });
+    const view = await renderApis([createApi(), otherApi]);
+
+    await act(async () => {
+      Simulate.click(getApiListItem(view.container, otherApi.apiName));
+      await Promise.resolve();
+    });
+
+    expect(mockConfirm).not.toHaveBeenCalled();
+    expect(getInput(view.container, "url").value).toBe(otherApi.url);
+
+    view.unmount();
+  });
+
+  test("switches APIs after the draft is deliberately discarded", async () => {
+    const selectedApi = createApi();
+    const otherApi = createApi({
+      apiSlug: "Other",
+      apiName: "Other",
+      url: "https://other.example/v1",
+    });
+    const view = await renderApis([selectedApi, otherApi]);
+    await editUrlDraft(view.container);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await act(async () => {
+      Simulate.click(getApiListItem(view.container, otherApi.apiName));
+      await Promise.resolve();
+    });
+
+    expect(getInput(view.container, "url").value).toBe(otherApi.url);
+    expect(getInput(view.container, "apiName").value).toBe(otherApi.apiName);
+
+    view.unmount();
+  });
+
+  test("keeps a local draft when the same API is refreshed with a new object", async () => {
+    const selectedApi = createApi();
+    const view = await renderApis(selectedApi);
+    const urlInput = await editUrlDraft(view.container);
+
+    await view.rerender([{ ...selectedApi }]);
+
+    expect(urlInput.value).toBe("https://draft.example/v1");
+    expect(getSaveButton(view.container).disabled).toBe(false);
+
+    view.unmount();
+  });
+
+  test("cancels alphabetical sorting without discarding the current draft", async () => {
+    const view = await renderApis([
+      createApi({ apiSlug: "charlie", apiName: "Charlie", sortOrder: 0 }),
+      createApi({ apiSlug: "alpha", apiName: "Alpha", sortOrder: 1 }),
+    ]);
+    const urlInput = await editUrlDraft(view.container);
+    mockConfirm.mockResolvedValueOnce(false);
+
+    await act(async () => {
+      Simulate.click(view.container.querySelector("#api-sort-button"));
+    });
+    const ascendingItem = Array.from(
+      document.body.querySelectorAll('[role="menuitemradio"]')
+    ).find((item) => item.textContent.trim() === "A–Z");
+    await act(async () => {
+      Simulate.click(ascendingItem);
+      await Promise.resolve();
+    });
+
+    expect(view.apiListValue.alphaSortApis).not.toHaveBeenCalled();
+    expect(urlInput.value).toBe("https://draft.example/v1");
+
+    view.unmount();
+  });
+
+  test("treats the already active sort direction as a no-op", async () => {
+    const view = await renderApis([
+      createApi({ apiSlug: "alpha", apiName: "Alpha", sortOrder: 0 }),
+      createApi({ apiSlug: "beta", apiName: "Beta", sortOrder: 1 }),
+    ]);
+    const urlInput = await editUrlDraft(view.container);
+
+    await act(async () => {
+      Simulate.click(view.container.querySelector("#api-sort-button"));
+    });
+    const ascendingItem = Array.from(
+      document.body.querySelectorAll('[role="menuitemradio"]')
+    ).find((item) => item.textContent.trim() === "A–Z");
+    await act(async () => {
+      Simulate.click(ascendingItem);
+      await Promise.resolve();
+    });
+
+    expect(mockConfirm).not.toHaveBeenCalled();
+    expect(view.apiListValue.alphaSortApis).not.toHaveBeenCalled();
+    expect(urlInput.value).toBe("https://draft.example/v1");
+
+    view.unmount();
+  });
+
+  test("sorts after the current draft is deliberately discarded", async () => {
+    const selectedApi = createApi({
+      apiSlug: "charlie",
+      apiName: "Charlie",
+      sortOrder: 0,
+    });
+    const view = await renderApis([
+      selectedApi,
+      createApi({ apiSlug: "alpha", apiName: "Alpha", sortOrder: 1 }),
+    ]);
+    await editUrlDraft(view.container);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await act(async () => {
+      Simulate.click(view.container.querySelector("#api-sort-button"));
+    });
+    const ascendingItem = Array.from(
+      document.body.querySelectorAll('[role="menuitemradio"]')
+    ).find((item) => item.textContent.trim() === "A–Z");
+    await act(async () => {
+      Simulate.click(ascendingItem);
+      await Promise.resolve();
+    });
+
+    expect(view.apiListValue.alphaSortApis).toHaveBeenCalledWith("asc");
+    expect(getInput(view.container, "url").value).toBe(selectedApi.url);
+    expect(getSaveButton(view.container).disabled).toBe(true);
+
+    view.unmount();
+  });
+
+  test("cancels drag reordering without discarding the current draft", async () => {
+    const selectedApi = createApi({
+      apiSlug: "alpha",
+      apiName: "Alpha",
+      sortOrder: 0,
+    });
+    const otherApi = createApi({
+      apiSlug: "beta",
+      apiName: "Beta",
+      sortOrder: 1,
+    });
+    const view = await renderApis([selectedApi, otherApi]);
+    const urlInput = await editUrlDraft(view.container);
+    mockConfirm.mockResolvedValueOnce(false);
+    const selectedCard = getApiListItem(view.container, "Alpha");
+    const otherCard = getApiListItem(view.container, "Beta");
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      getData: jest.fn(() => "alpha"),
+      setData: jest.fn(),
+    };
+
+    await act(async () => {
+      Simulate.dragStart(selectedCard.querySelector('[draggable="true"]'), {
+        dataTransfer,
+      });
+      Simulate.dragOver(otherCard.closest("li"), { dataTransfer });
+      Simulate.drop(otherCard.closest("li"), { dataTransfer });
+      await Promise.resolve();
+    });
+
+    expect(view.apiListValue.reorderApis).not.toHaveBeenCalled();
+    expect(urlInput.value).toBe("https://draft.example/v1");
+
+    view.unmount();
+  });
+
+  test("restores the persisted form before resetting an edited API", async () => {
+    const selectedApi = createApi();
+    const view = await renderApis(selectedApi);
+    await editUrlDraft(view.container);
+    const actionsButton = view.container.querySelector(
+      '[id^="api-detail-actions-button-"]'
+    );
+
+    await act(async () => Simulate.click(actionsButton));
+    const resetItem = Array.from(
+      document.body.querySelectorAll('[role="menuitem"]')
+    ).find((item) => item.textContent === "restore_default");
+    await act(async () => Simulate.click(resetItem));
+
+    expect(view.reset).toHaveBeenCalledTimes(1);
+    expect(getInput(view.container, "url").value).toBe(selectedApi.url);
+    expect(getSaveButton(view.container).disabled).toBe(true);
+
+    view.unmount();
+  });
+
+  test("confirms before adding an API when current detail is dirty", async () => {
+    const selectedApi = createApi({ apiSlug: "alpha", apiName: "Alpha" });
+    const view = await renderApis([selectedApi]);
+    await editUrlDraft(view.container);
+    mockConfirm.mockResolvedValueOnce(false);
+
+    const addButton = view.container.querySelector("#add-api-button");
+    await act(async () => {
+      Simulate.click(addButton);
+    });
+    const menu = document.body.querySelector("#add-api-menu");
+    await act(async () =>
+      Simulate.click(
+        Array.from(menu.querySelectorAll('[role="menuitem"]')).find((item) =>
+          item.textContent.includes("网络接口")
+        )
+      )
+    );
+    const menuItem = document.body.querySelector(
+      '[role="menu"][aria-label="网络接口"] [role="menuitem"]'
+    );
+    await act(async () => {
+      Simulate.click(menuItem);
+      await Promise.resolve();
+    });
+
+    expect(mockConfirm).toHaveBeenCalledWith({
+      message: "This API has unsaved changes. Discard them?",
+      confirmText: "discard_changes",
+      cancelText: "cancel",
+    });
+    expect(view.apiListValue.addApi).not.toHaveBeenCalled();
+    expect(getInput(view.container, "url").value).toBe(
+      "https://draft.example/v1"
+    );
+
+    view.unmount();
+  });
+});
+
+describe("Apis with stateful API hooks", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test.each([false, true])(
+    "restores defaults after saving and editing a draft (StrictMode: %s)",
+    async (strictMode) => {
+      const selectedApi = createApi({
+        apiSlug: "custom-openai",
+        apiName: "Custom OpenAI",
+      });
+      const defaultApi = DEFAULT_API_LIST.find(
+        (api) => api.apiType === selectedApi.apiType
+      );
+      const view = await renderStatefulApis([selectedApi], strictMode);
+
+      try {
+        await act(async () => {
+          Simulate.change(getInput(view.container, "url"), {
+            target: { name: "url", value: "https://saved.example/v1" },
+          });
+        });
+        await act(async () => Simulate.click(getSaveButton(view.container)));
+        expect(view.setting.transApis[0].url).toBe("https://saved.example/v1");
+        expect(getSaveButton(view.container).disabled).toBe(true);
+
+        await editUrlDraft(view.container);
+        await act(async () =>
+          Simulate.click(
+            view.container.querySelector('[id^="api-detail-actions-button-"]')
+          )
+        );
+        const resetItem = Array.from(
+          document.body.querySelectorAll('[role="menuitem"]')
+        ).find((item) => item.textContent === "restore_default");
+        await act(async () => Simulate.click(resetItem));
+        await flushEffects();
+
+        expect(view.setting.transApis[0]).toMatchObject({
+          apiSlug: selectedApi.apiSlug,
+          apiName: selectedApi.apiName,
+          apiType: selectedApi.apiType,
+          key: selectedApi.key,
+          url: defaultApi.url,
+        });
+        expect(getInput(view.container, "url").value).toBe(defaultApi.url);
+        expect(getInput(view.container, "model").value).toBe(defaultApi.model);
+        expect(getSaveButton(view.container).disabled).toBe(true);
+      } finally {
+        view.unmount();
+      }
+    }
+  );
+
+  test("reflects a persisted update when the form has no local draft", async () => {
+    const view = await renderStatefulApis([createApi()]);
+
+    try {
+      await view.updateSetting((setting) => ({
+        ...setting,
+        transApis: setting.transApis.map((api) => ({
+          ...api,
+          url: "https://updated.example/v1",
+        })),
+      }));
+
+      expect(getInput(view.container, "url").value).toBe(
+        "https://updated.example/v1"
+      );
+      expect(getSaveButton(view.container).disabled).toBe(true);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test.each([false, true])(
+    "saves edited fields without rolling back newer API values (StrictMode: %s)",
+    async (strictMode) => {
+      const view = await renderStatefulApis(
+        [createApi({ customHeader: "obsolete-header" })],
+        strictMode
+      );
+
+      try {
+        await editUrlDraft(view.container);
+        for (const version of [1, 2]) {
+          await view.updateSetting((setting) => ({
+            ...setting,
+            transApis: setting.transApis.map((api) => {
+              const nextApi = { ...api };
+              delete nextApi.customHeader;
+              return {
+                ...nextApi,
+                url: `https://synced.example/v${version}`,
+                key: `synced-key-${version}`,
+                model: version === 1 ? "gpt-4o" : "gpt-4.1",
+                sortOrder: version,
+              };
+            }),
+          }));
+
+          expect(getInput(view.container, "url").value).toBe(
+            "https://draft.example/v1"
+          );
+          expect(getInput(view.container, "model").value).toBe(
+            version === 1 ? "gpt-4o" : "gpt-4.1"
+          );
+          expect(getSaveButton(view.container).disabled).toBe(false);
+        }
+
+        await act(async () => getSaveButton(view.container).click());
+
+        expect(view.setting.transApis[0]).toMatchObject({
+          url: "https://draft.example/v1",
+          key: "synced-key-2",
+          model: "gpt-4.1",
+          sortOrder: 2,
+        });
+        expect(view.setting.transApis[0]).not.toHaveProperty("customHeader");
+        expect(getSaveButton(view.container).disabled).toBe(true);
+      } finally {
+        view.unmount();
+      }
+    }
+  );
+
+  describe.each([false, true])(
+    "API status rebasing (StrictMode: %s)",
+    (strictMode) => {
+      test.each([
+        {
+          name: "accepts a synced disable over a draft pin",
+          initialStatus: { isDisabled: false, sortOrder: 0 },
+          draftControls: ["isPinned"],
+          syncedStatus: { isDisabled: true, sortOrder: 1001 },
+          expectedStatus: { isDisabled: true, sortOrder: 1001 },
+        },
+        {
+          name: "accepts a synced disable over a draft unpin",
+          initialStatus: { isDisabled: false, sortOrder: -1 },
+          draftControls: ["isPinned"],
+          syncedStatus: { isDisabled: true, sortOrder: 1001 },
+          expectedStatus: { isDisabled: true, sortOrder: 1001 },
+        },
+        {
+          name: "keeps a draft disable over a synced pin",
+          initialStatus: { isDisabled: false, sortOrder: 0 },
+          draftControls: ["isDisabled"],
+          syncedStatus: { isDisabled: false, sortOrder: -1 },
+          expectedStatus: { isDisabled: true, sortOrder: 999 },
+        },
+        {
+          name: "keeps a draft enable over a synced disabled order",
+          initialStatus: { isDisabled: true, sortOrder: 999 },
+          draftControls: ["isDisabled"],
+          syncedStatus: { isDisabled: true, sortOrder: 1001 },
+          expectedStatus: { isDisabled: false, sortOrder: 0 },
+        },
+        {
+          name: "accepts a synced enable after toggling a draft back to disabled",
+          initialStatus: { isDisabled: true, sortOrder: 1001 },
+          draftControls: ["isDisabled", "isDisabled"],
+          syncedStatus: { isDisabled: false, sortOrder: -1 },
+          expectedStatus: { isDisabled: false, sortOrder: -1 },
+        },
+        {
+          name: "keeps a valid draft pin over a synced enabled order",
+          initialStatus: { isDisabled: false, sortOrder: 0 },
+          draftControls: ["isPinned"],
+          syncedStatus: { isDisabled: false, sortOrder: 2 },
+          expectedStatus: { isDisabled: false, sortOrder: -1 },
+        },
+        {
+          name: "keeps a draft enable and pin over a synced disabled order",
+          initialStatus: { isDisabled: true, sortOrder: 999 },
+          draftControls: ["isDisabled", "isPinned"],
+          syncedStatus: { isDisabled: true, sortOrder: 1001 },
+          expectedStatus: { isDisabled: false, sortOrder: -1 },
+        },
+      ])(
+        "$name before and after saving",
+        async ({
+          initialStatus,
+          draftControls,
+          syncedStatus,
+          expectedStatus,
+        }) => {
+          const otherApi = createApi({
+            apiSlug: "other",
+            apiName: "Other",
+            isDisabled: true,
+            sortOrder: 1200,
+          });
+          const view = await renderStatefulApis(
+            [
+              createApi({ ...initialStatus, customHeader: "obsolete-header" }),
+              otherApi,
+            ],
+            strictMode
+          );
+
+          try {
+            await editUrlDraft(view.container);
+            for (const control of draftControls) {
+              await act(async () => getInput(view.container, control).click());
+            }
+            expect(view.setting.transApis[0]).toMatchObject(initialStatus);
+
+            await view.updateSetting((setting) => ({
+              ...setting,
+              transApis: setting.transApis.map((api) => {
+                if (api.apiSlug !== "OpenAI") return api;
+                const syncedApi = {
+                  ...api,
+                  ...syncedStatus,
+                  url: "https://synced.example/v1",
+                  key: "synced-key",
+                  model: "gpt-4.1",
+                };
+                delete syncedApi.customHeader;
+                return syncedApi;
+              }),
+            }));
+
+            expect(getInput(view.container, "isDisabled").checked).toBe(
+              expectedStatus.isDisabled
+            );
+            expect(getInput(view.container, "isPinned").checked).toBe(
+              expectedStatus.sortOrder === -1
+            );
+            expect(getInput(view.container, "isPinned").disabled).toBe(
+              expectedStatus.isDisabled
+            );
+            expect(getInput(view.container, "url").value).toBe(
+              "https://draft.example/v1"
+            );
+            expect(getInput(view.container, "model").value).toBe("gpt-4.1");
+            expect(getSaveButton(view.container).disabled).toBe(false);
+
+            const expectedApi = {
+              ...expectedStatus,
+              url: "https://draft.example/v1",
+              key: "synced-key",
+              model: "gpt-4.1",
+            };
+            apiTranslate.mockResolvedValue({ trText: "Translated text" });
+            const testButton = Array.from(
+              view.container.querySelectorAll("button")
+            ).find((button) => button.textContent === "快捷翻译测试");
+            await act(async () => testButton.click());
+            expect(apiTranslate).toHaveBeenLastCalledWith(
+              expect.objectContaining({
+                apiSetting: expect.objectContaining(expectedApi),
+              })
+            );
+            expect(view.setting.transApis[0]).toMatchObject({
+              ...syncedStatus,
+              url: "https://synced.example/v1",
+            });
+
+            await act(async () => getSaveButton(view.container).click());
+
+            expect(view.setting.transApis[0]).toMatchObject(expectedApi);
+            expect(view.setting.transApis[0]).not.toHaveProperty(
+              "customHeader"
+            );
+            expect(view.setting.transApis[1]).toEqual(otherApi);
+            expect(getSaveButton(view.container).disabled).toBe(true);
+          } finally {
+            view.unmount();
+          }
+        }
+      );
+    }
+  );
+
+  test("accepts normalized draft values after a synced model change", async () => {
+    const view = await renderStatefulApis([
+      createApi({
+        apiSlug: OPT_TRANS_GEMINI,
+        apiType: OPT_TRANS_GEMINI,
+        model: "gemini-3-flash-preview",
+        thinkingMode: "enabled",
+        thinkingEffort: "high",
+      }),
+    ]);
+
+    try {
+      await act(async () => {
+        Simulate.change(getInput(view.container, "thinkingEffort"), {
+          target: { name: "thinkingEffort", value: "medium" },
+        });
+      });
+      await view.updateSetting((setting) => ({
+        ...setting,
+        transApis: setting.transApis.map((api) => ({
+          ...api,
+          model: "gemini-3-pro-preview",
+          thinkingEffort: "high",
+        })),
+      }));
+      expect(getSaveButton(view.container).disabled).toBe(false);
+
+      await act(async () => getSaveButton(view.container).click());
+
+      expect(view.setting.transApis[0]).toMatchObject({
+        model: "gemini-3-pro-preview",
+        thinkingMode: "enabled",
+        thinkingEffort: "high",
+      });
+      expect(getSaveButton(view.container).disabled).toBe(true);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("follows later updates after a draft is reverted to the received value", async () => {
+    const view = await renderStatefulApis([createApi()]);
+
+    try {
+      await editUrlDraft(view.container);
+      await view.updateSetting((setting) => ({
+        ...setting,
+        transApis: setting.transApis.map((api) => ({
+          ...api,
+          url: "https://synced.example/v1",
+        })),
+      }));
+      await act(async () => {
+        Simulate.change(getInput(view.container, "url"), {
+          target: { name: "url", value: "https://synced.example/v1" },
+        });
+      });
+      expect(getSaveButton(view.container).disabled).toBe(true);
+
+      await view.updateSetting((setting) => ({
+        ...setting,
+        transApis: setting.transApis.map((api) => ({
+          ...api,
+          url: "https://synced.example/v2",
+        })),
+      }));
+      expect(getInput(view.container, "url").value).toBe(
+        "https://synced.example/v2"
+      );
+      expect(getSaveButton(view.container).disabled).toBe(true);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("preserves a draft through an unrelated API update and identity refresh", async () => {
+    const view = await renderStatefulApis([
+      createApi(),
+      createApi({ apiSlug: "other", apiName: "Other", sortOrder: 1 }),
+    ]);
+
+    try {
+      await editUrlDraft(view.container);
+      await view.updateSetting((setting) => ({
+        ...setting,
+        transApis: setting.transApis.map((api) =>
+          api.apiSlug === "other"
+            ? { ...api, url: "https://other.example/v1" }
+            : { ...api }
+        ),
+      }));
+
+      expect(getInput(view.container, "url").value).toBe(
+        "https://draft.example/v1"
+      );
+      expect(getSaveButton(view.container).disabled).toBe(false);
+
+      await act(async () => Simulate.click(getSaveButton(view.container)));
+      expect(
+        view.setting.transApis.find((api) => api.apiSlug === "OpenAI").url
+      ).toBe("https://draft.example/v1");
+      expect(
+        view.setting.transApis.find((api) => api.apiSlug === "other").url
+      ).toBe("https://other.example/v1");
+      expect(getSaveButton(view.container).disabled).toBe(true);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("immediately selects the newly added API and resets detail state", async () => {
+    const scrollMock = jest.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrollMock;
+    const initialApi = createApi({ apiSlug: "initial", apiName: "Initial" });
+    const view = await renderStatefulApis([initialApi]);
+
+    try {
+      const addButton = view.container.querySelector("#add-api-button");
+      await act(async () => {
+        Simulate.click(addButton);
+      });
+      const menu = document.body.querySelector("#add-api-menu");
+      await act(async () =>
+        Simulate.click(
+          Array.from(menu.querySelectorAll('[role="menuitem"]')).find((item) =>
+            item.textContent.includes("网络接口")
+          )
+        )
+      );
+      const menuItem = document.body.querySelector(
+        '[role="menu"][aria-label="网络接口"] [role="menuitem"]'
+      );
+      await act(async () => {
+        Simulate.click(menuItem);
+      });
+      await flushEffects();
+
+      const selectedCard = view.container.querySelector(
+        '.kt-api-list__card[aria-current="true"]'
+      );
+      expect(selectedCard).not.toBeNull();
+      expect(selectedCard.textContent).not.toContain("Initial");
+
+      const detailName = getInput(view.container, "apiName");
+      expect(detailName.value).not.toBe("Initial");
+      expect(scrollMock).toHaveBeenCalledWith({
+        block: "nearest",
+        behavior: "smooth",
+      });
+    } finally {
+      delete window.HTMLElement.prototype.scrollIntoView;
+      view.unmount();
+    }
+  });
+
+  test("immediately selects the copied API after copying", async () => {
+    const initialApi = createApi({ apiSlug: "initial", apiName: "Initial" });
+    const view = await renderStatefulApis([initialApi]);
+
+    try {
+      const actionsButton = view.container.querySelector(
+        `#api-detail-actions-button-${initialApi.apiSlug}`
+      );
+      await act(async () => Simulate.click(actionsButton));
+      const copyItem = Array.from(
+        document.body.querySelectorAll('[role="menuitem"]')
+      ).find((item) => item.textContent === "copy_api");
+      await act(async () => Simulate.click(copyItem));
+      await flushEffects();
+
+      const selectedCard = view.container.querySelector(
+        '.kt-api-list__card[aria-current="true"]'
+      );
+      expect(selectedCard.textContent).toContain("Initial - copy");
+      expect(getInput(view.container, "apiName").value).toBe("Initial - copy");
+    } finally {
+      view.unmount();
+    }
+  });
+});
+
+describe("Apis batch concurrency", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("disables batch concurrency at one when context is enabled", async () => {
+    const view = await renderApis(
+      createApi({
+        useBatchFetch: true,
+        batchConcurrency: 4,
+        useContext: true,
+      })
+    );
+    const moreBtn = Array.from(view.container.querySelectorAll("button")).find(
+      (btn) => btn.textContent.includes("more")
+    );
+    if (moreBtn) {
+      act(() => {
+        Simulate.click(moreBtn);
+      });
+    }
+    const concurrencyInput = getInput(view.container, "batchConcurrency");
+
+    expect(concurrencyInput.value).toBe("1");
+    expect(concurrencyInput.disabled).toBe(true);
+    expect(view.container.textContent).toContain(
+      "batch_concurrency_context_hint"
+    );
+
+    // 验证合并后的单一翻译提示词控件存在，且旧的独立提示词控件不再在主界面单独渲染
+    expect(
+      view.container.querySelector('input[name="translationPromptSlug"]')
+    ).not.toBeNull();
+    expect(
+      view.container.querySelector('input[name="nobatchPromptSlug"]')
+    ).toBeNull();
+    expect(
+      view.container.querySelector('input[name="batchPromptSlug"]')
+    ).toBeNull();
+
+    view.unmount();
+  });
+
+  test("keeps legacy custom batch prompts in protocol-free compatibility mode", async () => {
+    const update = jest.fn();
+    const legacyPrompt = {
+      slug: "prompt_legacy_batch",
+      category: PROMPT_CATEGORY_BATCH_SYSTEM,
+      name: "Legacy Batch Prompt",
+      systemPrompt: "Return one translated line for each input segment.",
+      userPrompt: "",
+    };
+    const linePrompt = {
+      slug: "prompt_line_batch",
+      category: PROMPT_CATEGORY_BATCH_SYSTEM,
+      name: "LINE Batch Prompt",
+      protocol: "line",
+      systemPrompt: "Return numbered translated lines.",
+      userPrompt: "Translate:\n{{segments}}",
+    };
+    const view = await renderApis(
+      createApi({
+        useBatchFetch: true,
+        batchPromptSlug: linePrompt.slug,
+        systemPrompt: linePrompt.systemPrompt,
+        batchUserPrompt: linePrompt.userPrompt,
+        batchProtocol: linePrompt.protocol,
+      }),
+      update,
+      [legacyPrompt, linePrompt]
+    );
+
+    const selectPrompt = async (promptName) => {
+      const promptInput = getInput(view.container, "translationPromptSlug");
+      const combobox =
+        promptInput.parentElement.querySelector('[role="combobox"]');
+      await act(async () => {
+        combobox.dispatchEvent(
+          new MouseEvent("mousedown", { bubbles: true, cancelable: true })
+        );
+        await Promise.resolve();
+      });
+      const option = Array.from(
+        document.body.querySelectorAll('[role="option"]')
+      ).find((item) => item.textContent.includes(promptName));
+      await act(async () => option.click());
+    };
+
+    await selectPrompt(legacyPrompt.name);
+    await act(async () => Simulate.click(getSaveButton(view.container)));
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0][0]).toMatchObject({
+      useBatchFetch: true,
+      batchPromptSlug: legacyPrompt.slug,
+      systemPrompt: legacyPrompt.systemPrompt,
+      batchUserPrompt: "",
+    });
+    expect(update.mock.calls[0][0]).not.toHaveProperty("batchProtocol");
+
+    view.unmount();
+  });
+});
+
+describe("Apis temperature input", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("renders temperature input for OpenAI but hides it for Gemini and Gemini2", async () => {
+    const openaiView = await renderApis(
+      createApi({ apiType: OPT_TRANS_OPENAI })
+    );
+    expect(
+      openaiView.container.querySelector('input[name="temperature"]')
+    ).not.toBeNull();
+    openaiView.unmount();
+
+    const geminiView = await renderApis(
+      createApi({ apiType: OPT_TRANS_GEMINI })
+    );
+    expect(
+      geminiView.container.querySelector('input[name="temperature"]')
+    ).toBeNull();
+    geminiView.unmount();
+
+    const gemini2View = await renderApis(
+      createApi({ apiType: OPT_TRANS_GEMINI_2 })
+    );
+    expect(
+      gemini2View.container.querySelector('input[name="temperature"]')
+    ).toBeNull();
+    gemini2View.unmount();
+  });
+});
+
+describe("Apis QwenMT fields", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("shows fixed translation models without AI-only or batch controls", async () => {
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_QWENMT,
+        apiName: OPT_TRANS_QWENMT,
+        apiType: OPT_TRANS_QWENMT,
+        model: "qwen-mt-flash",
+        tone: "formal",
+        useBatchFetch: false,
+        useStream: false,
+      })
+    );
+
+    expect(getInput(view.container, "url")).not.toBeNull();
+    expect(view.container.querySelector('[name="key"]')).not.toBeNull();
+    expect(getInput(view.container, "model").dataset.options).toBe(
+      "qwen-mt-flash,qwen-mt-plus,qwen-mt-lite,qwen-mt-turbo"
+    );
+    expect(getInput(view.container, "tone")).not.toBeNull();
+    expect(
+      view.container.querySelector('input[name="modelListUrl"]')
+    ).toBeNull();
+    expect(
+      view.container.querySelector('input[name="temperature"]')
+    ).toBeNull();
+    expect(view.container.querySelector('input[name="maxTokens"]')).toBeNull();
+    expect(
+      view.container.querySelector('input[name="useBatchFetch"]')
+    ).toBeNull();
+    expect(view.container.querySelector('input[name="useStream"]')).toBeNull();
+    expect(view.container.querySelector('input[name="useContext"]')).toBeNull();
+
+    view.unmount();
+  });
+});
+
+describe("Apis Yandex fields", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test("uses the current Yandex Folder ID for testing and saving", async () => {
+    apiTranslate.mockResolvedValue({ trText: "你好" });
+    const update = jest.fn();
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_YANDEX,
+        apiName: OPT_TRANS_YANDEX,
+        apiType: OPT_TRANS_YANDEX,
+        url: "https://translate.api.cloud.yandex.net/translate/v2/translate",
+        folderId: "old-folder",
+        useBatchFetch: true,
+      }),
+      update
+    );
+
+    const folderIdInput = getInput(view.container, "folderId");
+    await act(async () => {
+      Simulate.change(folderIdInput, {
+        target: { name: "folderId", value: "new-folder" },
+      });
+    });
+    await act(async () => {
+      Simulate.click(
+        Array.from(view.container.querySelectorAll("button")).find(
+          (button) => button.textContent === "快捷翻译测试"
+        )
+      );
+      await Promise.resolve();
+    });
+    expect(apiTranslate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiSetting: expect.objectContaining({ folderId: "new-folder" }),
+      })
+    );
+
+    await act(async () => {
+      Simulate.click(getSaveButton(view.container));
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ folderId: "new-folder" })
+    );
+
+    view.unmount();
+  });
+
+  test("hides URL, Key, and Folder ID for YandexFree", async () => {
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_YANDEXFREE,
+        apiName: OPT_TRANS_YANDEXFREE,
+        apiType: OPT_TRANS_YANDEXFREE,
+        url: "",
+        key: "",
+        useBatchFetch: false,
+      })
+    );
+
+    expect(view.container.querySelector('input[name="url"]')).toBeNull();
+    expect(view.container.querySelector('[name="key"]')).toBeNull();
+    expect(view.container.querySelector('input[name="folderId"]')).toBeNull();
+
+    view.unmount();
+  });
+
+  test.each([OPT_TRANS_YANDEX, OPT_TRANS_YANDEXFREE])(
+    "uses the Yandex icon for %s",
+    async (apiType) => {
+      const view = await renderApis(
+        createApi({ apiSlug: apiType, apiName: apiType, apiType })
+      );
+
+      expect(
+        view.container.querySelector('img[src$="/api/Yandex.svg"]')
+      ).not.toBeNull();
+
+      view.unmount();
+    }
+  );
+});
+
+describe("Apis static thinking normalization", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test.each([
+    ["disabled", "low"],
+    ["enabled", null],
+    ["auto", "_default"],
+  ])(
+    "recognizes a newly entered Astra model in %s mode",
+    async (thinkingMode, expectedEffort) => {
+      apiTranslate.mockResolvedValue({ trText: "你好" });
+      const view = await renderApis(
+        createApi({
+          model: "unknown-model",
+          thinkingMode,
+          thinkingEffort: "_default",
+        })
+      );
+      await act(async () => {
+        Simulate.change(getInput(view.container, "model"), {
+          target: { name: "model", value: "gpt-6-astra" },
+        });
+      });
+      expect(view.container.textContent).not.toContain(
+        "thinking_unknown_model_helper"
+      );
+      expect(
+        getInput(view.container, "thinkingMode").getAttribute("aria-invalid")
+      ).not.toBe("true");
+      if (thinkingMode === "disabled") {
+        expect(view.container.textContent).toContain(
+          "gemini_thinking_minimum_helper"
+        );
+      }
+      await act(async () => {
+        Simulate.click(
+          Array.from(view.container.querySelectorAll("button")).find(
+            (button) => button.textContent === "快捷翻译测试"
+          )
+        );
+        await Promise.resolve();
+      });
+      expect(apiTranslate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiSetting: expect.objectContaining({
+            model: "gpt-6-astra",
+            thinkingMode,
+            thinkingEffort: expectedEffort,
+          }),
+        })
+      );
+      view.unmount();
+    }
+  );
+
+  test("normalizes an unsupported saved effort before saving", async () => {
+    const update = jest.fn();
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_GEMINI,
+        apiType: OPT_TRANS_GEMINI,
+        model: "gemini-3-pro-preview",
+        thinkingMode: "enabled",
+        thinkingEffort: "medium",
+      }),
+      update
+    );
+    const effortInput = getInput(view.container, "thinkingEffort");
+    expect(effortInput.value).toBe("_default");
+
+    await act(async () => {
+      Simulate.change(effortInput, {
+        target: { name: "thinkingEffort", value: "_default" },
+      });
+    });
+    await act(async () => {
+      Simulate.click(getSaveButton(view.container));
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thinkingMode: "enabled",
+        thinkingEffort: "high",
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("enables GPT-5.1 with low effort when clicking test", async () => {
+    apiTranslate.mockResolvedValue({ trText: "你好" });
+    const view = await renderApis(
+      createApi({
+        model: "gpt-5.1",
+        thinkingMode: "disabled",
+        thinkingEffort: "none",
+      })
+    );
+
+    await act(async () => {
+      Simulate.change(getInput(view.container, "thinkingMode"), {
+        target: { name: "thinkingMode", value: "enabled" },
+      });
+    });
+    await act(async () => {
+      Simulate.click(
+        Array.from(view.container.querySelectorAll("button")).find(
+          (button) => button.textContent === "快捷翻译测试"
+        )
+      );
+      await Promise.resolve();
+    });
+
+    expect(apiTranslate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiSetting: expect.objectContaining({
+          thinkingMode: "enabled",
+          thinkingEffort: "low",
+        }),
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("uses Gemini 3.6 Flash medium as the interface default", async () => {
+    apiTranslate.mockResolvedValue({ trText: "你好" });
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_GEMINI,
+        apiType: OPT_TRANS_GEMINI,
+        url: GEMINI_INTERACTIONS_URL,
+        model: "gemini-3.6-flash",
+        thinkingMode: "disabled",
+        thinkingEffort: "minimal",
+      })
+    );
+
+    await act(async () => {
+      Simulate.change(getInput(view.container, "thinkingMode"), {
+        target: { name: "thinkingMode", value: "enabled" },
+      });
+    });
+    expect(getInput(view.container, "thinkingEffort").value).toBe("medium");
+
+    await act(async () => {
+      Simulate.click(
+        Array.from(view.container.querySelectorAll("button")).find(
+          (button) => button.textContent === "快捷翻译测试"
+        )
+      );
+      await Promise.resolve();
+    });
+    expect(apiTranslate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiSetting: expect.objectContaining({
+          thinkingMode: "enabled",
+          thinkingEffort: "medium",
+        }),
+      })
+    );
+
+    view.unmount();
+  });
+});
+
+describe("Apis unknown model thinking warning", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  test.each(["enabled", "disabled"])(
+    "shows an error for unknown models in %s mode",
+    async (thinkingMode) => {
+      const view = await renderApis(
+        createApi({ model: "unknown-model", thinkingMode })
+      );
+      const modeInput = getInput(view.container, "thinkingMode");
+
+      expect(modeInput.getAttribute("aria-invalid")).toBe("true");
+      expect(view.container.textContent).toContain(
+        "thinking_unknown_model_helper"
+      );
+      expect(
+        view.container.querySelector('input[name="thinkingEffort"]')
+      ).toBeNull();
+
+      view.unmount();
+    }
+  );
+
+  test.each([
+    ["enabled", "high"],
+    ["disabled", "none"],
+  ])(
+    "treats persisted OpenRouter %s/%s settings as resolved",
+    async (thinkingMode, thinkingEffort) => {
+      apiTranslate.mockResolvedValue({ trText: "你好" });
+      const view = await renderApis(
+        createApi({
+          apiSlug: OPT_TRANS_OPENROUTER,
+          apiType: OPT_TRANS_OPENROUTER,
+          model: "provider/reasoning-model",
+          modelListUrl: "https://openrouter.ai/api/v1/models",
+          thinkingMode,
+          thinkingEffort,
+        })
+      );
+
+      expect(
+        getInput(view.container, "thinkingMode").getAttribute("aria-invalid")
+      ).toBe("false");
+      expect(view.container.textContent).not.toContain(
+        "thinking_unknown_model_helper"
+      );
+      expect(
+        view.container.querySelector('input[name="thinkingEffort"]')
+      ).toBeNull();
+
+      const testButton = Array.from(
+        view.container.querySelectorAll("button")
+      ).find((button) => button.textContent === "快捷翻译测试");
+      await act(async () => {
+        Simulate.click(testButton);
+        await Promise.resolve();
+      });
+      expect(apiTranslate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiSetting: expect.objectContaining({
+            thinkingMode,
+            thinkingEffort,
+          }),
+        })
+      );
+
+      view.unmount();
+    }
+  );
+
+  test("keeps unresolved OpenRouter defaults in the unknown state", async () => {
+    const view = await renderApis(
+      createApi({
+        apiSlug: OPT_TRANS_OPENROUTER,
+        apiType: OPT_TRANS_OPENROUTER,
+        model: "provider/unknown-model",
+        modelListUrl: "https://openrouter.ai/api/v1/models",
+        thinkingMode: "enabled",
+        thinkingEffort: "_default",
+      })
+    );
+
+    expect(
+      getInput(view.container, "thinkingMode").getAttribute("aria-invalid")
+    ).toBe("true");
+    expect(view.container.textContent).toContain(
+      "thinking_unknown_model_helper"
+    );
+
+    view.unmount();
+  });
+
+  test("keeps API default mode free of the unknown-model error", async () => {
+    const view = await renderApis(
+      createApi({ model: "unknown-model", thinkingMode: "auto" })
+    );
+
+    expect(
+      getInput(view.container, "thinkingMode").getAttribute("aria-invalid")
+    ).toBe("false");
+    expect(view.container.textContent).not.toContain(
+      "thinking_unknown_model_helper"
+    );
+
+    view.unmount();
+  });
+
+  test("uses the current unknown-model selection when clicking test", async () => {
+    apiTranslate.mockResolvedValue({ trText: "你好" });
+    const view = await renderApis(
+      createApi({ model: "unknown-model", thinkingMode: "enabled" })
+    );
+    const testButton = Array.from(
+      view.container.querySelectorAll("button")
+    ).find((button) => button.textContent === "快捷翻译测试");
+
+    await act(async () => {
+      Simulate.click(testButton);
+      await Promise.resolve();
+    });
+
+    expect(apiTranslate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiSetting: expect.objectContaining({
+          model: "unknown-model",
+          thinkingMode: "enabled",
+        }),
+        useCache: false,
+        usePool: false,
+      })
+    );
+
+    view.unmount();
+  });
+
+  test("renders all introductory alerts including the small model recommendation", async () => {
+    const view = await renderApis(createApi());
+    const infoAlert = view.container.querySelector(".MuiAlert-standardInfo");
+
+    expect(infoAlert).not.toBeNull();
+    expect(infoAlert.textContent).toContain("about_api");
+    expect(infoAlert.textContent).toContain("about_api_2");
+    expect(infoAlert.textContent).toContain("about_api_3");
+    expect(infoAlert.textContent).toContain("about_api_4");
+    expect(infoAlert.textContent).toContain("goto_custom_api_example");
+
+    view.unmount();
+  });
+});
+
+describe("service capability field filtering", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+    document.body.innerHTML = "";
+  });
+  test.each(["recognizeText", "transcribe", "synthesizeSpeech", "evaluate"])(
+    "local %s hides all language and translation fields",
+    async (cap) => {
+      const view = await renderApis(
+        createApi({
+          apiType: "LocalAI",
+          sourceType: "local",
+          enabledCapabilities: [cap],
+          modelRef: {
+            recognizeText: "ppocr-v5-mobile",
+            transcribe: "whisper-base-timestamped",
+            synthesizeSpeech: "kokoro-82m",
+            evaluate: "laya-multilingual-int8",
+          }[cap],
+          device: "wasm",
+        })
+      );
+      try {
+        for (const field of [
+          "tone",
+          "temperature",
+          "maxTokens",
+          "translationPromptSlug",
+          "subtitlePromptSlug",
+          "dictPromptSlug",
+          "vlmPromptSlug",
+          "useStream",
+          "modelListUrl",
+        ])
+          expect(view.container.querySelector(`[name="${field}"]`)).toBeNull();
+        expect(view.container.textContent).toContain("本地模型选择");
+      } finally {
+        view.unmount();
+      }
+    }
+  );
+  test("local translation exposes working AI options without network fields", async () => {
+    const view = await renderApis(
+      createApi({
+        apiType: "LocalAI",
+        sourceType: "local",
+        enabledCapabilities: ["translate"],
+        modelRef: "hy-mt2-1.8b",
+      })
+    );
+    try {
+      for (const field of [
+        "tone",
+        "temperature",
+        "maxTokens",
+        "translationPromptSlug",
+        "useStream",
+        "useContext",
+      ])
+        expect(
+          view.container.querySelector(`[name="${field}"]`)
+        ).not.toBeNull();
+      for (const field of [
+        "modelListUrl",
+        "subtitlePromptSlug",
+        "dictPromptSlug",
+        "vlmPromptSlug",
+      ])
+        expect(view.container.querySelector(`[name="${field}"]`)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+  test("VLM only shows its prompt and shared generation fields once", async () => {
+    const { PRESET_PROMPTS } = require("../../config/prompt");
+    const view = await renderApis(
+      createApi({
+        apiType: "LocalAI",
+        modelRef: "paddleocr-vl-1.6-onnx-q8",
+        device: "webgpu",
+        vlmPromptSlug: "vlm-document",
+        enabledCapabilities: ["parseImage"],
+      }),
+      jest.fn(),
+      PRESET_PROMPTS
+    );
+    try {
+      expect(getInput(view.container, "vlmPromptSlug").value).toBe(
+        "vlm-document"
+      );
+      for (const field of [
+        "tone",
+        "translationPromptSlug",
+        "subtitlePromptSlug",
+        "dictPromptSlug",
+        "useContext",
+        "useStream",
+      ])
+        expect(view.container.querySelector(`[name="${field}"]`)).toBeNull();
+      expect(
+        view.container.querySelectorAll('[name="maxTokens"]')
+      ).toHaveLength(1);
+    } finally {
+      view.unmount();
+    }
+  });
+  test("changing capabilities hides fields without clearing their saved values", async () => {
+    const update = jest.fn();
+    const api = createApi({
+      enabledCapabilities: ["translate", "dictionary", "chat"],
+      tone: "formal",
+      dictPromptSlug: "custom-dict",
+      useBatchFetch: true,
+    });
+    const view = await renderApis(api, update);
+    try {
+      const capabilitySelect = getInput(view.container, "enabledCapabilities")
+        .closest(".MuiInputBase-root")
+        .querySelector('[role="combobox"],[role="button"]');
+      await act(async () =>
+        Simulate.mouseDown(capabilitySelect, { button: 0 })
+      );
+      for (const name of ["translate", "dictionary"]) {
+        await act(async () =>
+          Simulate.click(
+            document.body.querySelector(`[role="option"][data-value="${name}"]`)
+          )
+        );
+      }
+      await act(async () =>
+        Simulate.keyDown(document.body.querySelector('[role="listbox"]'), {
+          key: "Escape",
+        })
+      );
+      expect(view.container.querySelector('[name="tone"]')).toBeNull();
+      expect(
+        view.container.querySelector('[name="dictPromptSlug"]')
+      ).toBeNull();
+      await act(async () => Simulate.click(getSaveButton(view.container)));
+      expect(update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          enabledCapabilities: ["chat"],
+          tone: "formal",
+          dictPromptSlug: "custom-dict",
+          useBatchFetch: true,
+        })
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+  test("switching a model after all capabilities are off announces the new defaults", async () => {
+    mockAlertInfo.mockClear();
+    const view = await renderApis(
+      createApi({
+        apiType: "LocalAI",
+        sourceType: "local",
+        modelRef: "whisper-base-timestamped",
+        device: "webgpu",
+        enabledCapabilities: [],
+      })
+    );
+    try {
+      expect(view.container.textContent).toContain("未启用任何能力");
+      const input = getInput(view.container, "modelRef");
+      await act(async () =>
+        Simulate.change(input, { target: { value: "hy-mt2-1.8b" } })
+      );
+      expect(
+        getInput(view.container, "enabledCapabilities")
+          .value.split(",")
+          .includes("translate")
+      ).toBe(true);
+      expect(
+        view.container.querySelector('[name="enabledCapabilities.transcribe"]')
+      ).toBeNull();
+      expect(mockAlertInfo).toHaveBeenCalledTimes(1);
+      expect(mockAlertInfo).toHaveBeenCalledWith(
+        "模型已切换，已启用新模型支持的能力，请检查能力选择"
+      );
+      expect(view.container.textContent).not.toContain("模型已切换");
+      expect(
+        view.container.querySelector(".MuiAlert-standardError")
+      ).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+});
+
+test("quick translation cancels its request when its service detail unmounts", async () => {
+  let finish;
+  apiTranslate.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+  );
+  const view = await renderApis(createApi());
+  let unmounted = false;
+  try {
+    const testButton = Array.from(
+      view.container.querySelectorAll("button")
+    ).find((button) => button.textContent === "快捷翻译测试");
+    await act(async () => Simulate.click(testButton));
+    const signal = apiTranslate.mock.calls.at(-1)[0].signal;
+    expect(signal.aborted).toBe(false);
+    view.unmount();
+    unmounted = true;
+    expect(signal.aborted).toBe(true);
+    await act(async () => finish({ trText: "late translation" }));
+  } finally {
+    if (!unmounted) view.unmount();
+    jest.clearAllMocks();
+  }
+});
