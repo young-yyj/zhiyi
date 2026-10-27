@@ -22,7 +22,7 @@ import RadioButtonCheckedIcon from "@mui/icons-material/RadioButtonChecked";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import RestartAltRoundedIcon from "@mui/icons-material/RestartAltRounded";
 import SwapHorizRoundedIcon from "@mui/icons-material/SwapHorizRounded";
-import TranslateRoundedIcon from "@mui/icons-material/TranslateRounded";
+import ZhiyiIcon from "../../components/ZhiyiIcon";
 import UndoRoundedIcon from "@mui/icons-material/UndoRounded";
 import IconButton from "@mui/material/IconButton";
 import MenuItem from "@mui/material/MenuItem";
@@ -957,7 +957,7 @@ export default function PopupCont({
               {isInCurrentBlacklist ? (
                 <RestartAltRoundedIcon />
               ) : (
-                <TranslateRoundedIcon />
+                <ZhiyiIcon />
               )}
             </span>
             {translationEnabled && !isInCurrentBlacklist && (

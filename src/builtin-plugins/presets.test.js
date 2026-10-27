@@ -5,6 +5,7 @@ import {
   OPT_TRANS_MICROSOFT,
   OPT_TRANS_DEEPSEEK,
   OPT_TRANS_LOCALAI,
+  OPT_TRANS_XIAOMIMIMO,
   OPT_TRANS_QWENMT,
   OPT_TRANS_OPENAI,
   OPT_LANGS_TO,
@@ -23,6 +24,15 @@ import { createBuiltinInstance } from "./index";
 const FORK_BASELINE_NORMALIZATION = {
   [OPT_TRANS_DEEPSEEK]: {
     model: "deepseek-v4-flash",
+    batchSize: 20,
+    batchLength: 10000,
+    batchConcurrency: 10,
+    maxTokens: 20480,
+    useStream: true,
+  },
+  // dualread fork：MiMo 同样是有意改动（V2.6-Pro + 保守批参数 + 非流式），归一回上游基线。
+  [OPT_TRANS_XIAOMIMIMO]: {
+    model: "mimo-v2.5-pro",
     batchSize: 20,
     batchLength: 10000,
     batchConcurrency: 10,
@@ -65,7 +75,8 @@ test("compiled presets preserve unrelated approved defaults while enabling strea
   for (const api of DEFAULT_API_LIST)
     expect(api.useStream).toBe(
       api.apiType !== OPT_TRANS_QWENMT &&
-        api.apiType !== OPT_TRANS_DEEPSEEK // dualread fork：DeepSeek 默认改非流式
+        api.apiType !== OPT_TRANS_DEEPSEEK && // dualread fork：DeepSeek 默认改非流式
+        api.apiType !== OPT_TRANS_XIAOMIMIMO // dualread fork：MiMo 同样改非流式
     );
   for (const api of DEFAULT_API_LIST)
     expect(

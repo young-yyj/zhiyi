@@ -1,4 +1,5 @@
-// Shared appearance for the content FAB and its live settings preview.
+// 悬浮球外观：品牌化自定义（青绿渐变 + 正圆），与扩展图标一致，
+// 不再沿用上游 M3 的容器色 / 圆角方形。
 export const FLOATING_BUTTON_STYLES = String.raw`
 .kt-content-fab.MuiFab-root {
   width: var(--kt-fab-size, 56px);
@@ -9,24 +10,24 @@ export const FLOATING_BUTTON_STYLES = String.raw`
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: var(--kt-fab-radius, 16px);
-  background-color: var(--kt-pric);
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2EE59D 0%, #0FB8FF 100%);
   box-shadow: var(--kt-shadow-2);
-  color: var(--kt-onpric);
+  color: #ffffff;
   cursor: pointer;
-  transition: background-color .2s ease, box-shadow .2s ease, transform .2s var(--kt-spring);
+  transition: filter .2s ease, box-shadow .2s ease, transform .2s var(--kt-spring);
 }
 @media (hover: hover) {
   .kt-content-fab.MuiFab-root:hover {
-    background-color: var(--kt-pric);
-    background-color: color-mix(in srgb, var(--kt-onpric) 8%, var(--kt-pric));
+    background: linear-gradient(135deg, #2EE59D 0%, #0FB8FF 100%);
+    filter: brightness(1.06);
   }
 }
 .kt-content-fab.MuiFab-root.Mui-focusVisible,
 .kt-content-fab.MuiFab-root[aria-expanded="true"],
 .kt-content-fab.MuiFab-root:active {
-  background-color: var(--kt-pric);
-  background-color: color-mix(in srgb, var(--kt-onpric) 10%, var(--kt-pric));
+  background: linear-gradient(135deg, #2EE59D 0%, #0FB8FF 100%);
+  filter: brightness(0.96);
 }
 .kt-content-fab.MuiFab-root:active { transform: scale(.96); }
 .kt-content-fab.MuiFab-root.Mui-focusVisible { outline: none; box-shadow: var(--kt-shadow-2), inset 0 0 0 3px var(--kt-pri); }

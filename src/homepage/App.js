@@ -14,7 +14,7 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import SubtitlesIcon from "@mui/icons-material/Subtitles";
 import SyncIcon from "@mui/icons-material/Sync";
 import TerminalIcon from "@mui/icons-material/Terminal";
-import TranslateIcon from "@mui/icons-material/Translate";
+import ZhiyiIcon from "../components/ZhiyiIcon";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -35,7 +35,7 @@ import { getHomepageTheme, getHomepageTokens } from "./theme";
 import { useHomepageSettings } from "./useHomepageSettings";
 
 const featureIcons = [
-  TranslateIcon,
+  ZhiyiIcon,
   LanguageIcon,
   InputIcon,
   VisibilityIcon,
@@ -274,7 +274,7 @@ function Hero({ content, tokens }) {
             href="file-translate.html"
             variant="outlined"
             size="large"
-            startIcon={<TranslateIcon />}
+            startIcon={<ZhiyiIcon />}
             sx={{ minHeight: 48 }}
           >
             {content.fileTranslation}
@@ -552,7 +552,7 @@ function FeatureDashboard({ content, tokens }) {
         }}
       >
         {content.features.map((feature, index) => {
-          const Icon = featureIcons[index] || TranslateIcon;
+          const Icon = featureIcons[index] || ZhiyiIcon;
           return (
             <Card
               key={feature.title}

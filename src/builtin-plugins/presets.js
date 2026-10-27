@@ -139,8 +139,14 @@ export const NATIVE_PRESET_OVERRIDES = {
   [OPT_TRANS_XIAOMIMIMO]: {
     url: "https://api.xiaomimimo.com/v1/chat/completions",
     modelListUrl: "https://api.xiaomimimo.com/v1/models",
-    model: "mimo-v2.5-pro",
     ...defaultAiApiOpts,
+    // dualread：V2.5 系列 2026-10-21 下线，改用 V2.6-Pro；批参数沿用 DeepSeek 保守基线（decisions §1）
+    model: "mimo-v2.6-pro",
+    batchSize: 8,
+    batchLength: 4000,
+    batchConcurrency: 3,
+    maxTokens: 8192,
+    useStream: false,
   },
   [OPT_TRANS_ALIYUNBAILIAN]: {
     url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",

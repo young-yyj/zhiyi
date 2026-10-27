@@ -4,7 +4,7 @@
  */
 
 import React from "react";
-import TranslateRoundedIcon from "@mui/icons-material/TranslateRounded";
+import ZhiyiIcon from "../../components/ZhiyiIcon";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
 import ViewQuiltRoundedIcon from "@mui/icons-material/ViewQuiltRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
@@ -211,7 +211,7 @@ export default function DualActionButton({
           e.currentTarget.style.backgroundColor = "#1976d2";
         }}
       >
-        <TranslateRoundedIcon style={{ fontSize: "16px" }} />
+        <ZhiyiIcon style={{ fontSize: "16px" }} />
       </button>
 
       {/* 4. 取消按钮 (可选，截图选框模式下渲染) */}

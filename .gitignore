@@ -31,6 +31,11 @@ package-lock.json
 *.patch
 *.crx
 *.pem
+# Extension signing key (fixed extension ID; never commit)
+/.keys/
+
+# Exported settings/rules backups may contain API keys — never commit
+/kiss-*.json
 *.zip
 .repomixignore
 .claude

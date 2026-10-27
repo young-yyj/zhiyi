@@ -2,7 +2,7 @@ import { ACTION_STYLES } from "./styles";
 import { getCssAtRuleBodies } from "../../styles/testUtils";
 
 describe("content FAB Material 3 shape", () => {
-  test("uses regular FAB geometry without morphing between states", () => {
+  test("uses brand circular FAB geometry without morphing between states", () => {
     const baseRule = ACTION_STYLES.match(
       /\.kt-content-fab\.MuiFab-root\s*\{([^}]*)\}/
     )?.[1];
@@ -17,13 +17,15 @@ describe("content FAB Material 3 shape", () => {
     expect(baseRule).toContain("height: var(--kt-fab-size, 56px)");
     expect(baseRule).toContain("min-width: var(--kt-fab-size, 56px)");
     expect(baseRule).toContain("min-height: var(--kt-fab-size, 56px)");
-    expect(baseRule).toContain("border-radius: var(--kt-fab-radius, 16px)");
-    expect(baseRule).toContain("background-color: var(--kt-pric)");
+    expect(baseRule).toContain("border-radius: 50%");
+    expect(baseRule).toContain(
+      "linear-gradient(135deg, #2EE59D 0%, #0FB8FF 100%)"
+    );
+    expect(baseRule).toContain("color: #ffffff");
     expect(baseRule).not.toMatch(/transition:[^;]*border-radius/);
-    expect(hoverRule).toContain("var(--kt-onpric) 8%");
+    expect(hoverRule).toContain("filter: brightness");
     expect(hoverRule).not.toContain("border-radius");
     expect(activeStateRule).not.toContain("border-radius");
-    expect(ACTION_STYLES).not.toContain("border-radius: 999px");
     expect(ACTION_STYLES).toContain("@media (hover: hover)");
     expect(ACTION_STYLES).toMatch(
       /\.kt-content-fab\.MuiFab-root\.Mui-focusVisible\s*\{[^}]*outline:\s*none;[^}]*inset 0 0 0 3px var\(--kt-pri\);/
@@ -36,7 +38,7 @@ describe("content FAB Material 3 shape", () => {
 
   test("overrides MUI state colors while keeping compact menu shapes", () => {
     expect(ACTION_STYLES).toMatch(
-      /\.kt-content-fab\.MuiFab-root\.Mui-focusVisible,[\s\S]*?\.kt-content-fab\.MuiFab-root:active\s*\{[^}]*var\(--kt-onpric\) 10%/
+      /\.kt-content-fab\.MuiFab-root\.Mui-focusVisible,[\s\S]*?\.kt-content-fab\.MuiFab-root:active\s*\{[^}]*filter:\s*brightness\(0\.96\)/
     );
     expect(ACTION_STYLES).toMatch(
       /\.kt-content-fab-menu\s*\{[^}]*border-radius:\s*4px;/

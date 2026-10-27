@@ -20,7 +20,7 @@ import Collapse from "@mui/material/Collapse";
 import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
-import TranslateRoundedIcon from "@mui/icons-material/TranslateRounded";
+import ZhiyiIcon from "../../../components/ZhiyiIcon";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
 import { sharedModelManager as manager } from "../../../localAi/core/modelManager";
 import { LlmClient, backendLabel } from "../../../localAi/core/llmClient";
@@ -463,7 +463,7 @@ export default function LlmTab() {
               <Button
                 variant="contained"
                 size="small"
-                startIcon={<TranslateRoundedIcon />}
+                startIcon={<ZhiyiIcon />}
                 disabled={
                   runtime.busy || !modelInstalled || busy || !transInput.trim()
                 }

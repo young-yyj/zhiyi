@@ -1,4 +1,4 @@
-import TranslateRoundedIcon from "@mui/icons-material/TranslateRounded";
+import ZhiyiIcon from "../../components/ZhiyiIcon";
 
 /**
  * Floating trigger shown next to a page selection.
@@ -40,7 +40,7 @@ export default function TranBtn({
       {...dynamicTriggerProps}
       onClick={handleClick}
     >
-      <TranslateRoundedIcon aria-hidden="true" />
+      <ZhiyiIcon aria-hidden="true" />
     </button>
   );
 }

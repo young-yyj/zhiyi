@@ -439,14 +439,16 @@ export class InputTranslator {
     this.#floatBtn.style.cssText = `
         position: fixed;
         width: ${size}; height: ${size};
-        background: #209CEE;
+        background: linear-gradient(135deg, #2EE59D 0%, #0FB8FF 100%);
         border-radius: 50%;
         z-index: 2147483647;
         cursor: pointer;
         display: flex; align-items: center; justify-content: center;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.22);
         transition: opacity 0.2s;
-        font-size: 13px; color: white;
+        font-size: ${isTouch ? "16px" : "14px"};
+        font-weight: 600; color: #ffffff;
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
         user-select: none; -webkit-user-select: none;
       `;
     this.#floatBtn.innerText = "译";

@@ -2,7 +2,7 @@ import { forwardRef } from "react";
 import Fab from "@mui/material/Fab";
 import SpeedDialIcon from "@mui/material/SpeedDialIcon";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
-import TranslateIcon from "@mui/icons-material/Translate";
+import ZhiyiIcon from "./ZhiyiIcon";
 import { DEFAULT_FAB, normalizeFabAppearance } from "../config/fab";
 
 // Keep the content button and its settings preview visually identical.
@@ -26,12 +26,12 @@ const FloatingButton = forwardRef(function FloatingButton(
     >
       {opensMenu ? (
         <SpeedDialIcon
-          icon={<TranslateIcon />}
+          icon={<ZhiyiIcon />}
           openIcon={<CloseRoundedIcon />}
           open={open}
         />
       ) : (
-        <TranslateIcon />
+        <ZhiyiIcon />
       )}
     </Fab>
   );

@@ -3,7 +3,7 @@ import TouchTranslateControl from "../../components/TouchTranslateControl";
 import PaletteRoundedIcon from "@mui/icons-material/PaletteRounded";
 import SelectAllRoundedIcon from "@mui/icons-material/SelectAllRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
-import TranslateRoundedIcon from "@mui/icons-material/TranslateRounded";
+import ZhiyiIcon from "../../components/ZhiyiIcon";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
 import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
 import VisibilityOffRoundedIcon from "@mui/icons-material/VisibilityOffRounded";
@@ -311,7 +311,7 @@ export function ContentFabContent({
   const items = [
     {
       label: i18n("popup_translate_page"),
-      icon: TranslateRoundedIcon,
+      icon: ZhiyiIcon,
       action: () => runAction(MSG_TRANS_TOGGLE),
     },
     {
@@ -342,7 +342,7 @@ export function ContentFabContent({
     },
     {
       label: i18n("touch_paragraph"),
-      icon: TranslateRoundedIcon,
+      icon: ZhiyiIcon,
       action: () => setTouchOpen((value) => !value),
       hidden: !supportsTouch(),
     },

@@ -18,9 +18,9 @@ This project is a fork of Kiss Translator v2.1.1
 (https://github.com/fishjar/kiss-translator, commit dev@dd06742),
 Copyright (C) the Kiss Translator authors, licensed under GPL-3.0.
 
-Modifications by young-yyj: DeepSeek-only preset, manual trigger, translation
-quality validation and retry, placeholder conservation, minimal default build,
-display name "Zhiyi (芷译)".
+Modifications by young-yyj: DeepSeek-primary preset with optional Xiaomi MiMo,
+manual trigger, translation quality validation and retry, placeholder conservation,
+minimal default build, display name "Zhiyi (芷译)", and custom brand icons.
 
 ## Assets and third-party components
 

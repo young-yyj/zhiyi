@@ -1,4 +1,4 @@
-import TranslateRoundedIcon from "@mui/icons-material/TranslateRounded";
+import ZhiyiIcon from "../../components/ZhiyiIcon";
 import { useI18n } from "../../hooks/I18n";
 import { useSetting } from "../../hooks/Setting";
 import { useRules } from "../../hooks/Rules";
@@ -53,7 +53,7 @@ export default function OverviewHero() {
       <div className="kt-overview-hero">
         <div className="kt-overview-hero__header">
           <span className="kt-overview-hero__icon" aria-hidden="true">
-            <TranslateRoundedIcon />
+            <ZhiyiIcon />
           </span>
           <span className="kt-overview-hero__copy">
             <span className="kt-overview-hero__title">
