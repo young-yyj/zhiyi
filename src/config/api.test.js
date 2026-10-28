@@ -48,7 +48,7 @@ test("includes Microsoft in the built-in API list", () => {
   ).toBe(true);
 });
 
-test("enables only the four initial translators while retaining every preset", () => {
+test("enables the configured AI services while retaining every preset", () => {
   expect(DEFAULT_API_LIST.map((api) => api.apiType)).toEqual(
     OPT_ALL_TRANS_TYPES
   );
@@ -56,10 +56,14 @@ test("enables only the four initial translators while retaining every preset", (
     DEFAULT_API_LIST.filter((api) => !api.isDisabled).map((api) => api.apiType)
   ).toEqual([
     OPT_TRANS_BUILTINAI,
-    OPT_TRANS_GOOGLE,
-    OPT_TRANS_GOOGLE_2,
-    OPT_TRANS_MICROSOFT,
+    OPT_TRANS_DEEPSEEK,
+    OPT_TRANS_OPENCODEGO,
+    OPT_TRANS_XIAOMIMIMO,
   ]);
+  // 三个 AI 服务置顶（sortOrder -1），其余已启用为 0。
+  expect(
+    DEFAULT_API_LIST.filter((api) => api.sortOrder === -1).map((api) => api.apiType)
+  ).toEqual([OPT_TRANS_DEEPSEEK, OPT_TRANS_OPENCODEGO, OPT_TRANS_XIAOMIMIMO]);
   expect(
     DEFAULT_API_LIST.filter((api) => api.isDisabled).every(
       (api) => api.sortOrder === 999

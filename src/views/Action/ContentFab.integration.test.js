@@ -128,7 +128,7 @@ describe.each(["document", "shadow root"])(
     test("preserves the legacy appearance when preferences are missing", () => {
       render();
 
-      expect(wrapper().style.transform).toBe("translate(-28px, 100px)");
+      expect(wrapper().style.transform).toBe("translate(0px, 100px)");
       expect(wrapper().style.opacity).toBe("1");
     });
 
@@ -142,10 +142,11 @@ describe.each(["document", "shadow root"])(
       (edge, x, y, small, large, full) => {
         const config = { edge, x, y, opacity: 0.35 };
         const transform = ([left, top]) => `translate(${left}px, ${top}px)`;
-        render({ ...config, size: 24 });
+        // 半隐藏已改为默认关闭，这里显式开启以继续验证半隐藏偏移。
+        render({ ...config, size: 24, halfHide: true });
         expect(wrapper().style.transform).toBe(transform(small));
 
-        render({ ...config, size: 96 });
+        render({ ...config, size: 96, halfHide: true });
         expect(wrapper().style.transform).toBe(transform(large));
         expect(wrapper().style.opacity).toBe("0.35");
 
@@ -156,16 +157,16 @@ describe.each(["document", "shadow root"])(
     );
 
     test.each([
-      [null, -28],
-      ["80", -28],
-      [NaN, -28],
-      [Infinity, -28],
+      [null, -14],
+      ["80", -14],
+      [NaN, -14],
+      [Infinity, -14],
       [0, -12],
       [200, -48],
     ])(
       "keeps an invalid stored size %p within supported bounds",
       (size, left) => {
-        render({ size });
+        render({ size, halfHide: true });
         expect(wrapper().style.transform).toBe(`translate(${left}px, 100px)`);
       }
     );
@@ -191,7 +192,7 @@ describe.each(["document", "shadow root"])(
         expect(menu()).toBeNull();
         expect(wrapper().style.opacity).toBe("0.35");
 
-        render({ halfHide: true, opacity: 0.6 });
+        render({ halfHide: true, size: 56, opacity: 0.6 });
         expect(wrapper().style.transform).toBe("translate(-28px, 100px)");
         expect(wrapper().style.opacity).toBe("0.6");
       }
@@ -212,7 +213,7 @@ describe.each(["document", "shadow root"])(
       ["0.4", "1"],
       [null, "1"],
     ])("keeps an invalid stored opacity %p visible", (opacity, expected) => {
-      render({ halfHide: null, opacity });
+      render({ halfHide: true, size: 56, opacity });
 
       expect(wrapper().style.opacity).toBe(expected);
       expect(wrapper().style.transform).toBe("translate(-28px, 100px)");
@@ -233,7 +234,7 @@ describe.each(["document", "shadow root"])(
         sendBgMsg.mockImplementation(() => {
           setTimeout(leaveWindow, 0);
         });
-        render();
+        render({ halfHide: true, size: 56 });
         act(() =>
           draggable().dispatchEvent(
             new MouseEvent("mouseover", { bubbles: true, composed: true })
@@ -285,7 +286,7 @@ describe.each(["document", "shadow root"])(
         const visibility = jest.spyOn(document, "visibilityState", "get");
         hidden.mockReturnValue(false);
         visibility.mockReturnValue("visible");
-        render();
+        render({ halfHide: true, size: 56 });
         openMenu();
         const focusedItem = focusRoot().activeElement;
         expect(menu().contains(focusedItem)).toBe(true);

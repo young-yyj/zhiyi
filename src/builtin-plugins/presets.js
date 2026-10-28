@@ -127,6 +127,7 @@ export const NATIVE_PRESET_OVERRIDES = {
   },
   [OPT_TRANS_OPENCODEGO]: {
     url: "https://opencode.ai/zen/go/v1/chat/completions",
+    modelListUrl: "https://opencode.ai/zen/go/v1/models",
     model: "deepseek-v4-flash",
     ...defaultAiApiOpts,
   },
@@ -137,8 +138,10 @@ export const NATIVE_PRESET_OVERRIDES = {
     ...defaultAiApiOpts,
   },
   [OPT_TRANS_XIAOMIMIMO]: {
-    url: "https://api.xiaomimimo.com/v1/chat/completions",
-    modelListUrl: "https://api.xiaomimimo.com/v1/models",
+    // dualread：走 Token Plan 订阅（中国集群）。按量付费地址为 api.xiaomimimo.com，
+    // 如需切换可新建实例改 URL；其它集群见 design.md §2.2b。
+    url: "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+    modelListUrl: "https://token-plan-cn.xiaomimimo.com/v1/models",
     ...defaultAiApiOpts,
     // dualread：V2.5 系列 2026-10-21 下线，改用 V2.6-Pro；批参数沿用 DeepSeek 保守基线（decisions §1）
     model: "mimo-v2.6-pro",
@@ -242,9 +245,17 @@ export const NATIVE_PRESET_OVERRIDES = {
   },
 };
 
+// dualread：默认只启用当前在用的 AI 服务（浏览器内置翻译保留作兜底）。
 export const DEFAULT_ENABLED_API_TYPES = new Set([
-  OPT_TRANS_MICROSOFT,
-  OPT_TRANS_GOOGLE,
-  OPT_TRANS_GOOGLE_2,
   OPT_TRANS_BUILTINAI,
+  OPT_TRANS_XIAOMIMIMO,
+  OPT_TRANS_DEEPSEEK,
+  OPT_TRANS_OPENCODEGO,
+]);
+
+// dualread：置顶显示（sortOrder = -1），排在其它已启用服务之前。
+export const PINNED_API_TYPES = new Set([
+  OPT_TRANS_XIAOMIMIMO,
+  OPT_TRANS_DEEPSEEK,
+  OPT_TRANS_OPENCODEGO,
 ]);

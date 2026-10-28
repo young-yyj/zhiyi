@@ -143,8 +143,8 @@ describe.each(["document", "shadow root"])("ContentFab in %s", (context) => {
 
     expect(draggableProps).toEqual(
       expect.objectContaining({
-        width: 56,
-        height: 56,
+        width: 28,
+        height: 28,
         snapEdge: true,
         fitContent: true,
       })

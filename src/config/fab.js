@@ -7,10 +7,11 @@ export const FAB_CLICK_ACTION_TRANSLATE = 1;
 export const FAB_CLICK_ACTION_POPUP = 2;
 
 export const DEFAULT_FAB = {
+  isHide: false, // 默认显示悬浮按钮
   hideExceptionList: "",
-  halfHide: true,
-  opacity: 1,
-  size: 56,
+  halfHide: false, // 默认不做半隐藏，完整显示
+  opacity: 1, // 默认完全不透明
+  size: 28, // 默认小巧尺寸
 };
 
 // Older stored configurations do not contain appearance preferences.

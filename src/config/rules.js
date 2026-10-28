@@ -3,7 +3,7 @@
  * @description 网页翻译规则相关的配置参数。定义匹配选择器、翻译时机、段落切分、生词高亮策略以及兜底和内置的定制网站翻译规则。
  */
 
-import { OPT_TRANS_DEEPSEEK } from "./api";
+import { OPT_TRANS_XIAOMIMIMO } from "./api";
 import { OPT_STYLE_NONE } from "./styles";
 
 // --- 规则模式关键字 ---
@@ -133,7 +133,7 @@ export const GLOBLA_RULE = {
   blockSelector: "",
   terms: "",
   aiTerms: "",
-  apiSlug: OPT_TRANS_DEEPSEEK, // dualread：默认使用 DeepSeek（只接 DeepSeek）
+  apiSlug: OPT_TRANS_XIAOMIMIMO, // dualread：默认使用小米 MiMo（DeepSeek 仍可作为可选服务）
   fromLang: "auto", // 默认自动识别原文语言
   toLang: "zh-CN", // 默认翻译为简体中文
   textStyle: OPT_STYLE_NONE, // 默认译文不加额外线条/高亮背景

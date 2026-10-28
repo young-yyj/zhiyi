@@ -3,7 +3,11 @@ import {
   DEFAULT_API_LIST,
   DEFAULT_API_SETTING,
   OPT_TRANS_MICROSOFT,
+  OPT_TRANS_BUILTINAI,
+  OPT_TRANS_GOOGLE,
+  OPT_TRANS_GOOGLE_2,
   OPT_TRANS_DEEPSEEK,
+  OPT_TRANS_OPENCODEGO,
   OPT_TRANS_LOCALAI,
   OPT_TRANS_XIAOMIMIMO,
   OPT_TRANS_QWENMT,
@@ -19,6 +23,15 @@ import baseline from "./fixtures/native-preset-baseline.json";
 import { NATIVE_PRESET_OVERRIDES } from "./presets";
 import { createBuiltinInstance } from "./index";
 
+// 上游基线默认只启用这四个服务；fork 调整了默认启用与置顶顺序，
+// 哈希比对前先归一化回基线值（与其它 fork 改动同样处理）。
+const UPSTREAM_ENABLED_API_TYPES = new Set([
+  OPT_TRANS_BUILTINAI,
+  OPT_TRANS_GOOGLE,
+  OPT_TRANS_GOOGLE_2,
+  OPT_TRANS_MICROSOFT,
+]);
+
 // dualread fork：DeepSeek 预设是有意改动的（模型名/批参数/非流式），这里把这几项
 // 归一回上游基线值，让其余预设仍然受基线哈希保护。
 const FORK_BASELINE_NORMALIZATION = {
@@ -30,14 +43,21 @@ const FORK_BASELINE_NORMALIZATION = {
     maxTokens: 20480,
     useStream: true,
   },
-  // dualread fork：MiMo 同样是有意改动（V2.6-Pro + 保守批参数 + 非流式），归一回上游基线。
+  // dualread fork：MiMo 同样是有意改动（V2.6-Pro + 保守批参数 + 非流式 + Token Plan 地址），
+  // 归一回上游基线。
   [OPT_TRANS_XIAOMIMIMO]: {
     model: "mimo-v2.5-pro",
+    url: "https://api.xiaomimimo.com/v1/chat/completions",
+    modelListUrl: "https://api.xiaomimimo.com/v1/models",
     batchSize: 20,
     batchLength: 10000,
     batchConcurrency: 10,
     maxTokens: 20480,
     useStream: true,
+  },
+  // OpenCodeGo 上游模型列表地址为空字符串，fork 补全后哈希比对时还原。
+  [OPT_TRANS_OPENCODEGO]: {
+    modelListUrl: "",
   },
 };
 
@@ -60,6 +80,9 @@ test("compiled presets preserve unrelated approved defaults while enabling strea
               false,
             // Normalize only the newly approved timeout default for the historical hash.
             httpTimeout: 30,
+            // fork 调整了默认启用集合与置顶顺序，哈希比对前归一回上游值。
+            isDisabled: !UPSTREAM_ENABLED_API_TYPES.has(api.apiType),
+            sortOrder: UPSTREAM_ENABLED_API_TYPES.has(api.apiType) ? 0 : 999,
           }))
         )
       )

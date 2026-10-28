@@ -2,7 +2,10 @@ import { checkRules, matchRule, saveRule } from "./rules";
 import { getDisabledSubRules, getRulesWithDefault, saveEdit } from "./storage";
 import { loadOrFetchSubRules } from "./subRules";
 import { GLOBLA_RULE } from "../config/rules";
-import { OPT_TRANS_MICROSOFT, OPT_TRANS_TENCENT } from "../config/api";
+import {
+  OPT_TRANS_XIAOMIMIMO,
+  OPT_TRANS_TENCENT,
+} from "../config/api";
 import { DEFAULT_API_SETTING } from "../config";
 
 jest.mock("./storage", () => ({
@@ -41,8 +44,8 @@ jest.mock("./detect", () => ({
   tryDetectLang: jest.fn(),
 }));
 
-test("uses Microsoft as the default webpage translator", () => {
-  expect(GLOBLA_RULE.apiSlug).toBe(OPT_TRANS_MICROSOFT);
+test("uses Xiaomi MiMo as the default webpage translator", () => {
+  expect(GLOBLA_RULE.apiSlug).toBe(OPT_TRANS_XIAOMIMIMO);
 });
 
 test("keeps an explicitly stored Tencent global rule", async () => {

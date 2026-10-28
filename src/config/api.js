@@ -23,6 +23,7 @@ import {
 import {
   NATIVE_PRESET_OVERRIDES,
   DEFAULT_ENABLED_API_TYPES,
+  PINNED_API_TYPES,
 } from "../builtin-plugins/presets";
 
 export * from "./apiConstants";
@@ -441,7 +442,11 @@ export const DEFAULT_API_LIST = OPT_ALL_TRANS_TYPES.map((apiType) =>
     apiName: apiType,
     apiType,
     isDisabled: !DEFAULT_ENABLED_API_TYPES.has(apiType),
-    sortOrder: DEFAULT_ENABLED_API_TYPES.has(apiType) ? 0 : 999,
+    sortOrder: PINNED_API_TYPES.has(apiType)
+      ? -1
+      : DEFAULT_ENABLED_API_TYPES.has(apiType)
+        ? 0
+        : 999,
   })
 );
 
@@ -503,6 +508,11 @@ export function normalizeApiModelListUrls(transApis = []) {
 }
 
 export const DEFAULT_API_TYPE = OPT_TRANS_MICROSOFT;
-export const DEFAULT_API_SETTING = DEFAULT_API_LIST.find(
-  (a) => a.apiType === DEFAULT_API_TYPE
-);
+// 该对象是「新建实例 / 测试」的配置模板，不应携带列表排序或禁用状态，
+// 否则展开模板创建的服务会继承 -1/0/999 的展示顺序，影响选择回退。
+export const DEFAULT_API_SETTING = (() => {
+  const apiSetting = DEFAULT_API_LIST.find(
+    (a) => a.apiType === DEFAULT_API_TYPE
+  );
+  return { ...apiSetting, isDisabled: false, sortOrder: 0 };
+})();
