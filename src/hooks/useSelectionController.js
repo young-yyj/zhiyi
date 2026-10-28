@@ -19,12 +19,13 @@ import {
   OPT_TRANBOX_INTERACT_DBLCLICK,
 } from "../config";
 import {
+  getCenteredBoxPosition,
   getMaxTranBoxX,
   getMaxTranBoxY,
   getTranBoxOuterHeight,
 } from "../libs/tranboxPosition";
 
-const TRANBTN_SIZE = 40;
+const TRANBTN_SIZE = 28;
 const TRANBTN_MOUSE_GAP = isMobile ? 16 : 12;
 const MAX_SOURCE_SENTENCE_LENGTH = 1000;
 
@@ -462,9 +463,13 @@ export default function useSelectionController({
       setSelectionSource(snapshot.selectionSource || null);
       setShowBtn(false);
       setText(snapshot.text);
+      // 打开时默认居中；若开启「跟随选区」则由调用方按选区定位。
+      if (!followSelection) {
+        setBoxPosition(getCenteredBoxPosition(boxSize));
+      }
       setShowBox(true);
     },
-    [setShowBox]
+    [setShowBox, followSelection, boxSize, setBoxPosition]
   );
 
   const handleOpenTranbox = useCallback(

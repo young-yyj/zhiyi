@@ -1,5 +1,3 @@
-import ZhiyiIcon from "../../components/ZhiyiIcon";
-
 /**
  * Floating trigger shown next to a page selection.
  *
@@ -40,7 +38,7 @@ export default function TranBtn({
       {...dynamicTriggerProps}
       onClick={handleClick}
     >
-      <ZhiyiIcon aria-hidden="true" />
+      <span aria-hidden="true">译</span>
     </button>
   );
 }

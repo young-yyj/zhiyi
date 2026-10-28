@@ -76,3 +76,25 @@ export function getMaxTranBoxY(contentHeight) {
     getTranBoxViewportHeight() - getTranBoxOuterHeight(contentHeight)
   );
 }
+
+/**
+ * Get the viewport-centered position for the translation box.
+ * Used when opening the panel so it appears centered instead of restoring
+ * a previously dragged position.
+ */
+export function getCenteredBoxPosition(size) {
+  const width = Number(size?.w) || 0;
+  const height = Number(size?.h) || 0;
+  return {
+    x: Math.max(
+      0,
+      Math.round((getTranBoxViewportWidth() - getTranBoxOuterWidth(width)) / 2)
+    ),
+    y: Math.max(
+      0,
+      Math.round(
+        (getTranBoxViewportHeight() - getTranBoxOuterHeight(height)) / 2
+      )
+    ),
+  };
+}

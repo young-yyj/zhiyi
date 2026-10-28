@@ -620,7 +620,8 @@ describe("useSelectionController", () => {
     });
     await dispatchWindowMouseup();
 
-    expect(controller.state.position).toEqual({ x: 280, y: 200 });
+    // 按钮尺寸 28px：320-28=292，240-28=212。
+    expect(controller.state.position).toEqual({ x: 292, y: 212 });
 
     act(() => {
       controller.root.unmount();
@@ -672,7 +673,7 @@ describe("useSelectionController", () => {
     currentSelection = makeSelection("library", pageParagraph);
     await dispatchWindowMouseup(200, { clientX: 318, clientY: 238 });
 
-    expect(controller.state.position).toEqual({ x: 280, y: 200 });
+    expect(controller.state.position).toEqual({ x: 292, y: 212 });
 
     act(() => {
       controller.root.unmount();
@@ -716,7 +717,7 @@ describe("useSelectionController", () => {
     });
     act(() => window.dispatchEvent(new Event("resize")));
 
-    expect(controller.state.position).toEqual({ x: 160, y: 110 });
+    expect(controller.state.position).toEqual({ x: 172, y: 122 });
 
     act(() => {
       controller.root.unmount();

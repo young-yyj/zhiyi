@@ -1,4 +1,5 @@
 import {
+  getCenteredBoxPosition,
   getMaxTranBoxContentWidth,
   getMaxTranBoxContentHeight,
   getMaxTranBoxX,
@@ -125,5 +126,23 @@ describe("translation box viewport bounds", () => {
 
     expect(getMaxTranBoxContentHeight()).toBe(0);
     expect(getMaxTranBoxY(200)).toBe(0);
+  });
+
+  test("centers the box in the current viewport", () => {
+    clientWidth.mockReturnValue(1266);
+    clientHeight.mockReturnValue(806);
+
+    // 外框 = 内容宽 + 16 抓手；高 = 内容高 + 74（56 header + 抓手/边框）。
+    expect(getCenteredBoxPosition({ w: 400, h: 200 })).toEqual({
+      x: Math.round((1266 - 416) / 2),
+      y: Math.round((806 - 274) / 2),
+    });
+  });
+
+  test("clamps the centered position at the viewport origin", () => {
+    clientWidth.mockReturnValue(300);
+    clientHeight.mockReturnValue(150);
+
+    expect(getCenteredBoxPosition({ w: 600, h: 400 })).toEqual({ x: 0, y: 0 });
   });
 });

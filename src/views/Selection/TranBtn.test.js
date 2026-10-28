@@ -47,7 +47,7 @@ test("keeps the selection FAB inside its themed render root", () => {
   expect(button.style.position).toBe("fixed");
   expect(button.style.left).toBe("20px");
   expect(button.style.top).toBe("30px");
-  expect(button.querySelector('[data-testid="ZhiyiIcon"]')).not.toBe(null);
+  expect(button.textContent).toBe("译");
   expect(button.innerHTML).not.toContain("#209CEE");
 
   const mouseDown = new MouseEvent("mousedown", {

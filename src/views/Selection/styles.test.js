@@ -91,25 +91,24 @@ describe("selection Material 3 shapes", () => {
       /\.KT-tranbtn:active\s*\{([^}]*)\}/
     )?.[1];
 
-    expect(baseRule).toContain("border-radius: 12px");
-    expect(baseRule).toContain("width: 40px");
-    expect(baseRule).toContain("height: 40px");
+    expect(baseRule).toContain("border-radius: 50%");
+    expect(baseRule).toContain("width: 28px");
+    expect(baseRule).toContain("height: 28px");
     expect(baseRule).toContain("border: 0");
-    expect(baseRule).toContain("color: var(--kt-onpric)");
+    expect(baseRule).toContain(
+      "linear-gradient(135deg, #2EE59D 0%, #0FB8FF 100%)"
+    );
+    expect(baseRule).toContain("color: #ffffff");
+    expect(baseRule).toContain("font-size: 13px");
     expect(baseRule).not.toContain("animation:");
     expect(baseRule).not.toMatch(/transition:[^;]*border-radius/);
     expect(SELECTION_STYLES).toMatch(
       /@media\s*\(hover:\s*hover\)\s*\{\s*\.KT-tranbtn:hover/
     );
-    expect(hoverRule).toContain("var(--kt-onpric) 8%");
+    expect(hoverRule).toContain("filter: brightness");
     expect(hoverRule).not.toContain("border-radius");
     expect(activeRule).toContain("transform: scale(.94)");
-    expect(SELECTION_STYLES).toMatch(
-      /\.KT-tranbtn svg\s*\{[^}]*fill:\s*currentColor;[^}]*\}/
-    );
-    expect(SELECTION_STYLES).not.toMatch(
-      /\.KT-tranbtn svg\s*\{[^}]*border-radius:/
-    );
+    expect(SELECTION_STYLES).not.toMatch(/\.KT-tranbtn svg\s*\{/);
   });
 
   test("keeps a complete keyboard focus fallback", () => {
