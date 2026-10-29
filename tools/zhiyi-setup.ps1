@@ -9,6 +9,17 @@ $ErrorActionPreference = 'Stop'
 $Repo = 'young-yyj/zhiyi'
 $Headers = @{ 'User-Agent' = 'Zhiyi-Setup' }
 
+function Invoke-WithRetry {
+    param([scriptblock]$Action, [string]$Label, [int]$Attempts = 3)
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try { return (& $Action) } catch {
+            if ($i -eq $Attempts) { throw }
+            Write-Host ("Retry " + $i + "/" + ($Attempts - 1) + " after failure: " + $Label)
+            Start-Sleep -Seconds (2 * $i)
+        }
+    }
+}
+
 function Get-Sha256([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create()
     $stream = [IO.File]::OpenRead($Path)
@@ -21,11 +32,15 @@ function Get-Package([string]$LocalPath, [string]$WorkDir) {
         if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) { throw "Package not found: $LocalPath" }
         return (Get-Item -LiteralPath $LocalPath).FullName
     }
-    $release = Invoke-RestMethod -Uri ("https://api.github.com/repos/" + $Repo + "/releases/latest") -Headers $Headers
+    $release = Invoke-WithRetry -Label 'query latest release' -Action {
+        Invoke-RestMethod -Uri ("https://api.github.com/repos/" + $Repo + "/releases/latest") -Headers $Headers -TimeoutSec 60
+    }
     $assets = @($release.assets | Where-Object { $_.name -like 'zhiyi-chrome-*.zip' })
     if ($assets.Count -ne 1) { throw 'Latest release must contain exactly one zhiyi-chrome zip.' }
     $zip = Join-Path $WorkDir $assets[0].name
-    Invoke-WebRequest -Uri $assets[0].browser_download_url -OutFile $zip -Headers $Headers
+    Invoke-WithRetry -Label 'download package' -Action {
+        Invoke-WebRequest -Uri $assets[0].browser_download_url -OutFile $zip -Headers $Headers
+    } | Out-Null
     $digest = ([string]$assets[0].digest) -replace '^sha256:', ''
     if ($digest -and (Get-Sha256 $zip) -ne $digest.ToLowerInvariant()) { throw 'SHA-256 mismatch.' }
     return $zip
@@ -99,7 +114,13 @@ try {
     }
     if (-not $NoOpenBrowser) { Open-ChromeExtensions }
 } catch {
-    Write-Error $_.Exception.Message
+    Write-Host ''
+    Write-Host 'Install failed:'
+    Write-Host ('  ' + $_.Exception.Message)
+    Write-Host ''
+    Write-Host 'Check your network and try again, or install from a local package:'
+    Write-Host '  zhiyi-setup.cmd -PackagePath "D:\path\to\zhiyi-chrome-<version>.zip"'
+    Write-Host ''
     exit 1
 } finally {
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
