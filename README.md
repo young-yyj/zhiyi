@@ -28,9 +28,17 @@
 
 ## 📦 安装
 
-1. 从 [Releases](https://github.com/young-yyj/zhiyi/releases/latest) 下载 `zhiyi-chrome-*.zip` 并解压。
-2. 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择解压目录。
-3. 打开扩展设置 → 接口列表 → **XiaomiMimo**（或 **DeepSeek** / **OpenCodeGo**）→ 填写 API Key 并保存；默认服务已指向 XiaomiMimo，如需切换在「网页翻译 → 全局规则」里选择。
+**一键脚本（推荐）**：
+
+1. 从 [Releases](https://github.com/young-yyj/zhiyi/releases/latest) 下载 `zhiyi-windows-installer.zip` 并解压。
+2. 双击 `zhiyi-setup.cmd`。脚本会自动下载最新扩展包、校验 SHA-256，并安装到 `%LOCALAPPDATA%\Zhiyi\Extension`。
+3. 首次在 `chrome://extensions` 开启「开发者模式」→「加载已解压的扩展程序」→ 选择脚本输出的目录。
+
+以后更新：再双击同一个 `zhiyi-setup.cmd`，然后在扩展卡片点刷新、刷新已打开的网页。
+
+**手动方式**：下载 `zhiyi-chrome-*.zip` 解压后，在 `chrome://extensions` 开启开发者模式并加载解压目录。
+
+完成安装后，打开扩展设置 → 接口列表 → **XiaomiMimo**（或 **DeepSeek** / **OpenCodeGo**）→ 填写 API Key 并保存；默认服务已指向 XiaomiMimo，如需切换在「网页翻译 → 全局规则」里选择。
 
 > 当前发布包为最小构建（约 9 MB），不含本地 AI 资源；需要完整构建请从源码构建并设置 `DUALREAD_FULL=1`。
 
