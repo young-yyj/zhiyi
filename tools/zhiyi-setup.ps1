@@ -1,13 +1,22 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$PackagePath,
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Zhiyi\Extension'),
     [switch]$NoOpenBrowser
 )
 
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $ErrorActionPreference = 'Stop'
 $Repo = 'young-yyj/zhiyi'
 $Headers = @{ 'User-Agent' = 'Zhiyi-Setup' }
+
+function Write-Banner([string]$Title) {
+    Write-Host ''
+    Write-Host '============================================================'
+    Write-Host ('  ' + $Title)
+    Write-Host '============================================================'
+    Write-Host ''
+}
 
 function Invoke-WithRetry {
     param([scriptblock]$Action, [string]$Label, [int]$Attempts = 3)
@@ -100,26 +109,50 @@ try {
 
     $oldVersion = Read-Version $target
     if ($oldVersion -eq $newVersion) {
-        Write-Host ("AlreadyCurrent: " + $newVersion)
+        Write-Banner ('芷译 已是最新版本 (' + $newVersion + ')')
+        Write-Host ('  安装位置: ' + $target)
+        Write-Host ''
+        Write-Host '  无需操作。'
+        Write-Host ''
         exit 0
     }
 
     Install-Package $target $stage
-    Write-Host ("Installed: " + $newVersion)
-    Write-Host ("Extension directory: " + $target)
+
     if ($oldVersion) {
-        Write-Host 'Update: click the extension card refresh button, then refresh open web pages.'
+        Write-Banner ('芷译 已更新到 ' + $newVersion)
+        Write-Host ('  原版本  : ' + $oldVersion)
+        Write-Host ('  新版本  : ' + $newVersion)
+        Write-Host ('  安装位置: ' + $target)
+        Write-Host ''
+        Write-Host '  接下来请在 Chrome 中刷新扩展:'
+        Write-Host '    1. 打开 chrome://extensions'
+        Write-Host '    2. 在「芷译」卡片上点击刷新按钮'
+        Write-Host '    3. 刷新已打开的网页，让新脚本生效'
+        Write-Host ''
     } else {
-        Write-Host 'First install: enable Developer mode in chrome://extensions, choose Load unpacked, and select the directory above.'
+        Write-Banner ('芷译 安装完成 (' + $newVersion + ')')
+        Write-Host ('  版本    : ' + $newVersion)
+        Write-Host ('  安装位置: ' + $target)
+        Write-Host ''
+        Write-Host '  接下来请把这个扩展添加到 Chrome:'
+        Write-Host '    1. 打开 chrome://extensions'
+        Write-Host '    2. 打开右上角的「开发者模式」'
+        Write-Host '    3. 点击「加载已解压的扩展程序」'
+        Write-Host '    4. 选择上面显示的安装位置'
+        Write-Host ''
+        Write-Host '  完成后打开英文网页，按 Alt+Z 翻译，再按一次还原。'
+        Write-Host ''
     }
     if (-not $NoOpenBrowser) { Open-ChromeExtensions }
 } catch {
+    Write-Banner '安装失败'
+    Write-Host ('  原因: ' + $_.Exception.Message)
     Write-Host ''
-    Write-Host 'Install failed:'
-    Write-Host ('  ' + $_.Exception.Message)
-    Write-Host ''
-    Write-Host 'Check your network and try again, or install from a local package:'
-    Write-Host '  zhiyi-setup.cmd -PackagePath "D:\path\to\zhiyi-chrome-<version>.zip"'
+    Write-Host '  可以尝试:'
+    Write-Host '    1. 检查网络后重新运行本脚本'
+    Write-Host '    2. 或者手动下载扩展包，然后用本地安装:'
+    Write-Host '       zhiyi-setup.cmd -PackagePath "D:\下载\zhiyi-chrome-<版本>.zip"'
     Write-Host ''
     exit 1
 } finally {
