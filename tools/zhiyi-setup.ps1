@@ -141,6 +141,8 @@ try {
         Write-Host '    3. 点击「加载已解压的扩展程序」'
         Write-Host '    4. 选择上面显示的安装位置'
         Write-Host ''
+        Write-Host '  别忘了：在扩展设置里填写 API Key（接口列表 → XiaomiMimo）'
+        Write-Host ''
         Write-Host '  完成后打开英文网页，按 Alt+Z 翻译，再按一次还原。'
         Write-Host ''
     }
